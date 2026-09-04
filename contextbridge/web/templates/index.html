@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ContextBridge — Cross-Model Memory Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">&#x1F309;</span>
+            <h1>ContextBridge</h1>
+            <span class="badge">v0.1.0</span>
+        </div>
+        <p class="tagline">Drop your files &bull; Extract memory &bull; Paste into any AI</p>
+    </header>
+
+    <main class="container">
+        <!-- ===== STEP 1: DROP FILES ===== -->
+        <section class="card extract-card">
+            <div class="card-header">
+                <div>
+                    <h2><span class="step-badge">1</span> Drop Your Files</h2>
+                    <p class="subtitle">ChatGPT exports, PDFs, documents, chat logs &mdash; drop everything</p>
+                </div>
+            </div>
+
+            <!-- Drop Zone -->
+            <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone-content">
+                    <div class="drop-zone-icon">&#x1F4C1;</div>
+                    <p class="drop-zone-title">Drag &amp; drop files here</p>
+                    <p class="drop-zone-subtitle">or <button class="link-btn"
+                            onclick="document.getElementById('file-input').click()">browse files</button></p>
+                    <div class="supported-formats">
+                        <span class="format-tag">.zip (ChatGPT Export)</span>
+                        <span class="format-tag">.pdf</span>
+                        <span class="format-tag">.txt</span>
+                        <span class="format-tag">.json</span>
+                        <span class="format-tag">.html</span>
+                        <span class="format-tag">.md</span>
+                    </div>
+                </div>
+                <input type="file" id="file-input" multiple accept=".zip,.pdf,.txt,.json,.html,.htm,.md,.text,.log"
+                    hidden>
+            </div>
+
+            <!-- File List -->
+            <div id="file-list" class="file-list" style="display:none;">
+                <div class="file-list-header">
+                    <span id="file-count">0 files selected</span>
+                    <button class="btn btn-sm btn-ghost" onclick="clearFiles()">Clear All</button>
+                </div>
+                <div id="file-items"></div>
+            </div>
+
+            <!-- Config -->
+            <div class="form-row" id="extract-config" style="display:none;">
+                <div class="form-group">
+                    <label for="package-name">Package Name</label>
+                    <input type="text" id="package-name" placeholder="e.g. my_project" autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="source-model">Extraction Engine</label>
+                    <select id="source-model">
+                        <option value="openai">OpenAI (needs API key)</option>
+                        <option value="claude">Claude (needs API key)</option>
+                        <optgroup label="Local (Ollama)" id="ollama-models">
+                            <option value="local" selected>Detecting models...</option>
+                        </optgroup>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn btn-primary btn-lg" id="extract-btn" style="display:none;" onclick="extractContext()">
+                <span class="btn-icon">&#x26A1;</span> Extract Memory from Files
+            </button>
+
+            <!-- Extraction Results -->
+            <div id="extract-results" class="results-panel" style="display:none;">
+                <div class="results-header">
+                    <h3>&#x2705; Extraction Complete</h3>
+                    <span id="results-meta" class="meta"></span>
+                </div>
+                <div id="files-processed" class="files-processed"></div>
+                <div id="memory-grid" class="memory-grid"></div>
+            </div>
+        </section>
+
+        <!-- ===== STEP 2: GENERATE PROMPT ===== -->
+        <section class="card prompt-card">
+            <div class="card-header">
+                <div>
+                    <h2><span class="step-badge">2</span> Generate Prompt for Web UI</h2>
+                    <p class="subtitle">One click &rarr; paste into Claude or ChatGPT web</p>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="prompt-package">Context Package</label>
+                    <select id="prompt-package">
+                        <option value="">Select a package</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="target-model">Target (paste into)</label>
+                    <select id="target-model">
+                        <option value="claude">Claude Web</option>
+                        <option value="openai">ChatGPT Web</option>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn btn-accent btn-lg" id="prompt-btn" onclick="generatePrompt()">
+                <span class="btn-icon">&#x1F3AF;</span> Generate &amp; Copy to Clipboard
+            </button>
+
+            <!-- Generated Prompt -->
+            <div id="prompt-results" class="results-panel" style="display:none;">
+                <div class="results-header">
+                    <h3 id="prompt-target-label">Ready for Claude</h3>
+                    <button class="btn btn-sm btn-copy" onclick="copyPrompt()">
+                        <span id="copy-icon">&#x1F4CB;</span> <span id="copy-text">Copy to Clipboard</span>
+                    </button>
+                </div>
+                <pre id="prompt-output" class="prompt-box"></pre>
+                <div class="paste-instructions">
+                    <p><strong>Open Claude/ChatGPT web &rarr; Ctrl+V &rarr; Send</strong></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== SAVED PACKAGES ===== -->
+        <section class="card packages-card">
+            <div class="card-header">
+                <div>
+                    <h2>&#x1F4E6; Saved Packages</h2>
+                </div>
+                <button class="btn btn-sm btn-ghost" onclick="loadPackages()">&#x1F504; Refresh</button>
+            </div>
+            <div id="packages-list" class="packages-list">
+                <p class="empty-state">Loading...</p>
+            </div>
+        </section>
+    </main>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay" style="display:none;">
+        <div class="spinner"></div>
+        <p id="loading-text">Extracting structured memory...</p>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast" style="display:none;"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>
