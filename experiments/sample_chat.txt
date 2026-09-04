@@ -1,0 +1,19 @@
+User: Hi, Im Tirth Patel. Im a Computer Science student and Im building an AI portfolio to land a research or engineering role at a top lab.
+
+Assistant: Nice to meet you, Tirth! What kind of project are you building?
+
+User: Im building ContextBridge -- a cross-model memory system for LLMs. I want to use Python with FastAPI for the backend, and I prefer clean architecture with proper separation of concerns.
+
+Assistant: That sounds like a great project! Lets start with the core memory extraction module. What data models are you thinking of?
+
+User: I decided to use Pydantic for data models and FAISS for vector search. Each memory should belong to one of six categories: identity, projects, facts, decisions, open tasks, and preferences.
+
+Assistant: Good choices. Pydantic gives you validation and serialization for free. FAISS is excellent for local similarity search. Should we also implement a CLI?
+
+User: Yes absolutely. I want a CLI tool called cb with commands for export, import, and query. I also need versioning for context packages so I can track changes over time.
+
+Assistant: Perfect. Let me outline the CLI commands: cb export for extracting context from chat transcripts, cb import for loading context into a new model session, and cb query for asking questions with injected context. For versioning, we can store diffs between versions.
+
+User: I still need to write the evaluation experiments and the README. Can you help me design the metrics?
+
+Assistant: Sure! Key metrics would be: token savings (comparing raw chat tokens vs compressed context tokens), context recall (how much relevant info is preserved), and cross-model consistency (whether imported context produces coherent responses across different models).
