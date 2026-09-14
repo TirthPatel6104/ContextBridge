@@ -1,0 +1,21 @@
+{
+  "id": "thesis_research",
+  "title": "Graduate student planning experiments",
+  "transcript": "User: I'm Marco, a PhD student studying computational linguistics at the University of Trento.\n\nAssistant: Nice to meet you, Marco. What are you working on?\n\nUser: I'm working on a thesis about low-resource machine translation for Ladin, a Rhaeto-Romance language.\n\nAssistant: Interesting. Have you chosen a modelling approach?\n\nUser: I decided to fine-tune NLLB-200 rather than train a model from scratch, because the parallel corpus is only about 40k sentence pairs.\n\nAssistant: That is sensible for that data size. What constraints should I keep in mind?\n\nUser: Keep in mind the GPU budget is 40 hours per week on the department cluster. Also, I avoid closed-source APIs for the experiments so the results stay reproducible.\n\nAssistant: Noted. What is the next step?\n\nUser: I need to run the BLEU and chrF evaluation on the held-out test split before the committee meeting.\n\nAssistant: I can help you set up sacrebleu for both metrics. Anything about how you like results written up?\n\nUser: I always want citations in APA format, and I like tables over prose for numbers.\n\nAssistant: Understood, APA citations and tabular results it is.",
+  "gold_items": [
+    {"category": "identity", "content": "Marco is a PhD student in computational linguistics at the University of Trento", "keywords": ["marco"]},
+    {"category": "projects", "content": "Thesis on low-resource machine translation for Ladin", "keywords": ["ladin"]},
+    {"category": "decisions", "content": "Fine-tune NLLB-200 rather than train from scratch (only ~40k sentence pairs)", "keywords": ["nllb"]},
+    {"category": "facts", "content": "GPU budget is 40 hours per week on the department cluster", "keywords": ["gpu", "40 hours"]},
+    {"category": "preferences", "content": "Avoids closed-source APIs so experiments stay reproducible", "keywords": ["closed-source"]},
+    {"category": "open_tasks", "content": "Run BLEU and chrF evaluation on the held-out test split", "keywords": ["bleu", "chrf"]},
+    {"category": "preferences", "content": "Wants citations in APA format", "keywords": ["apa"]}
+  ],
+  "queries": [
+    {"query": "which translation model did we decide to fine-tune", "relevant_gold": [2]},
+    {"query": "evaluation metrics still to run on the test split", "relevant_gold": [5]},
+    {"query": "compute budget constraints on the cluster", "relevant_gold": [3]},
+    {"query": "citation format for the write-up", "relevant_gold": [6]},
+    {"query": "policy on closed-source APIs", "relevant_gold": [4]}
+  ]
+}

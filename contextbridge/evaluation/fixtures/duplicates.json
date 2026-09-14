@@ -1,0 +1,25 @@
+{
+  "description": "Pairs of memory statements labelled as duplicates (same fact, different wording) or not. Non-duplicates are deliberately close in topic so the merger must actually discriminate.",
+  "pairs": [
+    {"a": "Use PostgreSQL for the production database", "b": "Use PostgreSQL for the production database.", "duplicate": true},
+    {"a": "Using PostgreSQL for the production database", "b": "PostgreSQL will be used for the production database", "duplicate": true},
+    {"a": "Prefers SQLAlchemy 2.0 style with typed models", "b": "Prefers the SQLAlchemy 2.0 style using typed models", "duplicate": true},
+    {"a": "Deadline is the end of Q3", "b": "The deadline is the end of Q3", "duplicate": true},
+    {"a": "Write the Alembic migration for the ledger table", "b": "Write an Alembic migration for the ledger table", "duplicate": true},
+    {"a": "Marco is a PhD student in computational linguistics", "b": "Marco is a PhD student studying computational linguistics", "duplicate": true},
+    {"a": "Wants citations in APA format", "b": "Citations should be in APA format", "duplicate": true},
+    {"a": "Launch on October 14 with a 30-day free trial", "b": "Launch is on October 14 with a 30 day free trial", "duplicate": true},
+    {"a": "Prefers short bullet-point summaries over long documents", "b": "Prefers short bullet point summaries rather than long documents", "duplicate": true},
+    {"a": "GPU budget is 40 hours per week on the cluster", "b": "The GPU budget on the cluster is 40 hours per week", "duplicate": true},
+    {"a": "Use PostgreSQL for the production database", "b": "Use SQLite for the local development database", "duplicate": false},
+    {"a": "Deadline is the end of Q3", "b": "Deadline is the end of Q4", "duplicate": false},
+    {"a": "Write the Alembic migration for the ledger table", "b": "Write the Alembic migration for the accounts table", "duplicate": false},
+    {"a": "Wants citations in APA format", "b": "Wants citations in IEEE format", "duplicate": false},
+    {"a": "Launch on October 14 with a 30-day free trial", "b": "Launch on November 4 with a 14-day free trial", "duplicate": false},
+    {"a": "Prefers short bullet-point summaries", "b": "Prefers long narrative documents", "duplicate": false},
+    {"a": "Fine-tune NLLB-200 rather than train from scratch", "b": "Train a transformer from scratch instead of fine-tuning NLLB-200", "duplicate": false},
+    {"a": "Legal must approve the terms of service before announcement", "b": "Marketing must approve the blog post before announcement", "duplicate": false},
+    {"a": "Priya is a backend engineer at a fintech startup", "b": "Priya is a frontend engineer at a healthcare startup", "duplicate": false},
+    {"a": "Avoids closed-source APIs for experiments", "b": "Uses closed-source APIs for experiments", "duplicate": false}
+  ]
+}

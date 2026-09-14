@@ -1,0 +1,21 @@
+{
+  "id": "product_launch",
+  "title": "Product manager preparing a pricing launch",
+  "transcript": "User: I'm Dana, I work as a product manager at a B2B analytics company.\n\nAssistant: Great to meet you, Dana. How can I help today?\n\nUser: I'm building the launch plan for our new usage-based pricing tier and I want to get the sequencing right.\n\nAssistant: Let's start with what is already fixed. Do you have a date?\n\nUser: We decided to launch on October 14 with a 30-day free trial for existing customers.\n\nAssistant: Good. Any dependencies before the announcement?\n\nUser: The constraint is that legal must approve the updated terms of service before anything is announced publicly.\n\nAssistant: Then legal sign-off is the critical path. What else is open?\n\nUser: I need to draft the pricing FAQ for the sales team, and make sure the changelog mentions that the legacy Starter plan is deprecated.\n\nAssistant: I can draft both. How do you like documents structured?\n\nUser: I prefer short bullet-point summaries over long documents, and I always want a one-line TL;DR at the top.\n\nAssistant: Understood: bullets, short, TL;DR first.",
+  "gold_items": [
+    {"category": "identity", "content": "Dana is a product manager at a B2B analytics company", "keywords": ["dana"]},
+    {"category": "projects", "content": "Building the launch plan for a usage-based pricing tier", "keywords": ["usage-based pricing"]},
+    {"category": "decisions", "content": "Launch on October 14 with a 30-day free trial for existing customers", "keywords": ["october 14"]},
+    {"category": "facts", "content": "Legal must approve the updated terms of service before any public announcement", "keywords": ["legal"]},
+    {"category": "open_tasks", "content": "Draft the pricing FAQ for the sales team", "keywords": ["faq"]},
+    {"category": "facts", "content": "Changelog must mention that the legacy Starter plan is deprecated", "keywords": ["changelog", "deprecated"]},
+    {"category": "preferences", "content": "Prefers short bullet-point summaries with a one-line TL;DR at the top", "keywords": ["bullet"]}
+  ],
+  "queries": [
+    {"query": "when is the launch date", "relevant_gold": [2]},
+    {"query": "what does legal need to approve", "relevant_gold": [3]},
+    {"query": "how should documents be formatted", "relevant_gold": [6]},
+    {"query": "what remains for sales enablement", "relevant_gold": [4]},
+    {"query": "deprecated plan in the changelog", "relevant_gold": [5]}
+  ]
+}
