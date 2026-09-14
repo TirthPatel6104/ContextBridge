@@ -39,7 +39,6 @@ DECISION_KEYWORDS = [
     "i'll use",
     "i'll go with",
     "let's use",
-    "i prefer",
     "i want to use",
     "we should use",
     "going with",
@@ -104,11 +103,12 @@ FACT_KEYWORDS = [
 class LocalExtractor:
     """Extract structured memory from text using rules — no API needed."""
 
-    def extract(self, text: str) -> StructuredMemory:
+    def extract(self, text: str, *, origin: str = "") -> StructuredMemory:
         """Extract structured memory from raw text.
 
         Args:
             text: Raw chat transcript or document text.
+            origin: Provenance label stamped on every extracted item.
 
         Returns:
             StructuredMemory with items categorised via heuristics.
@@ -131,6 +131,10 @@ class LocalExtractor:
 
         # Deduplicate within each category
         memory = self._deduplicate(memory)
+
+        if origin:
+            for item in memory.all_items:
+                item.origin = origin
 
         return memory
 

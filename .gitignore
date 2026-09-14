@@ -29,6 +29,9 @@ Thumbs.db
 
 # ContextBridge local storage
 .contextbridge/
+*.db
+*.db-wal
+*.db-shm
 
 # FAISS indices
 *.faiss

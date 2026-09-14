@@ -146,6 +146,7 @@ class MemoryExtractor:
         adapter: LLMInterface,
         *,
         source_model: str = "",
+        origin: str = "",
     ) -> StructuredMemory:
         """
         Extract structured memory from a raw chat transcript.
@@ -158,6 +159,8 @@ class MemoryExtractor:
             The LLM adapter to use for extraction.
         source_model : str, optional
             Name of the model that produced the conversation.
+        origin : str, optional
+            Provenance label (file name, chat title) stamped on every item.
 
         Returns
         -------
@@ -185,7 +188,7 @@ class MemoryExtractor:
         )
 
         # Parse the response
-        memory = self._parse_response(raw_response)
+        memory = self._parse_response(raw_response, origin=origin)
         logger.info("Extracted %d total memory items", memory.total_items)
         return memory
 
@@ -196,13 +199,14 @@ class MemoryExtractor:
         adapter: LLMInterface,
         *,
         source_model: str = "",
+        origin: str = "",
     ) -> StructuredMemory:
         """
         Extract new memory from a conversation, merging with existing memory.
 
         This avoids duplicating facts already captured in previous extractions.
         """
-        new_memory = await self.extract(raw_chat, adapter, source_model=source_model)
+        new_memory = await self.extract(raw_chat, adapter, source_model=source_model, origin=origin)
         return existing.merge(new_memory)
 
     # -- Private helpers ----------------------------------------------------
@@ -217,8 +221,11 @@ class MemoryExtractor:
         return "\n\n".join(lines)
 
     @staticmethod
-    def _parse_response(raw: str) -> StructuredMemory:
-        """Parse the LLM's JSON response into a StructuredMemory object."""
+    def _parse_response(raw: str, *, origin: str = "") -> StructuredMemory:
+        """Parse the LLM's JSON response into a StructuredMemory object.
+
+        The raw response is never logged: it contains the user's memory.
+        """
         # Strip markdown fences if present
         cleaned = raw.strip()
         if cleaned.startswith("```"):
@@ -228,26 +235,38 @@ class MemoryExtractor:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            logger.error("Failed to parse LLM response as JSON: %s", exc)
-            logger.debug("Raw response: %s", raw)
+            logger.error("Failed to parse LLM response as JSON (%s)", exc.__class__.__name__)
+            return StructuredMemory()
+        if not isinstance(data, dict):
+            logger.error("LLM response was valid JSON but not an object")
             return StructuredMemory()
 
         memory = StructuredMemory()
         for cat in MemoryCategory:
             items_data = data.get(cat.value, [])
+            if not isinstance(items_data, list):
+                continue
             items: list[MemoryItem] = []
             for item_data in items_data:
-                if isinstance(item_data, str):
-                    items.append(MemoryItem(category=cat, content=item_data))
+                if isinstance(item_data, str) and item_data.strip():
+                    items.append(MemoryItem(category=cat, content=item_data.strip(), origin=origin))
                 elif isinstance(item_data, dict):
+                    content = str(item_data.get("content", "")).strip()
+                    if not content:
+                        continue
+                    try:
+                        confidence = float(item_data.get("confidence", 1.0))
+                    except (TypeError, ValueError):
+                        confidence = 1.0
                     items.append(
                         MemoryItem(
                             category=cat,
-                            content=item_data.get("content", ""),
-                            confidence=float(item_data.get("confidence", 1.0)),
-                            source=item_data.get("source", ""),
+                            content=content,
+                            confidence=min(1.0, max(0.0, confidence)),
+                            source=str(item_data.get("source", "") or ""),
+                            origin=origin,
                         )
                     )
-            setattr(memory, cat.value, items)
+            memory.set_category(cat, items)
 
         return memory

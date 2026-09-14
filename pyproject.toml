@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "contextbridge"
 version = "0.1.0"
-description = "A cross-model conversational memory system for LLMs"
+description = "Portable, privacy-conscious working memory for moving work between ChatGPT, Claude, and local models"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
     {name = "Tirth Patel"},
 ]
-keywords = ["llm", "context", "memory", "ai", "cross-model"]
+keywords = ["llm", "context", "memory", "ai", "cross-model", "privacy", "retrieval"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -20,6 +20,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
@@ -54,9 +55,17 @@ cb = "contextbridge.cli:main"
 where = ["."]
 include = ["contextbridge*"]
 
+[tool.setuptools.package-data]
+contextbridge = [
+    "web/templates/*.html",
+    "web/static/*",
+    "evaluation/fixtures/*.json",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "strict"
 
 [tool.ruff]
 target-version = "py311"
