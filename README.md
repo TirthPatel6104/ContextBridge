@@ -1,271 +1,280 @@
 <p align="center">
   <h1 align="center">🌉 ContextBridge</h1>
-  <p align="center">
-    <strong>A cross-model conversational memory system for LLMs</strong>
-  </p>
-  <p align="center">
-    Extract structured memory from a conversation with one model, version it, and inject only the relevant parts into another — GPT, Claude, or a local Ollama model.
-  </p>
+  <p align="center"><strong>Portable, privacy-conscious working memory for people who move between ChatGPT, Claude, and local models.</strong></p>
+  <p align="center">Extract structured memory from a conversation, review and redact it, retrieve only what the next task needs, and paste it into any model — with every selection explained.</p>
 </p>
 
 <p align="center">
   <a href="https://github.com/TirthPatel6104/ContextBridge/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/TirthPatel6104/ContextBridge/actions/workflows/ci.yml/badge.svg" /></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-201%20offline-brightgreen" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-purple" />
 </p>
 
 ---
 
 ## The problem
 
-Switch from ChatGPT to Claude (or to a local LLaMA) mid-project and everything the previous model knew about you is gone: who you are, what you're building, the decisions you already made, the tasks still open. You re-explain from scratch, burn tokens, and lose continuity.
+You spend an afternoon in ChatGPT designing a database schema. The next morning you open Claude to write the migration, and it knows nothing: not your name, not the stack, not the three decisions you already argued through, not the two tasks still open. So you re-explain — badly, from memory, burning tokens on a wall of pasted chat that is mostly noise.
 
-## The solution
+Every AI tool keeps its own memory, none of them share it, and none of them let you see or edit what they remember. Pasting whole transcripts is the workaround, and it leaks secrets, wastes context windows, and still loses the thread.
 
-ContextBridge treats conversational context as **data with a schema**, not as a blob of chat history:
+## What ContextBridge does
 
-1. **Extract** — an LLM (or an offline rule-based extractor) turns a transcript into six typed memory categories.
-2. **Package** — memory is stored as a versioned *context package* with a full diff history and rollback.
-3. **Retrieve** — on a new query, only the semantically relevant memory items are pulled back via FAISS vector search.
-4. **Inject** — the prompt is rendered in the target model's preferred format (XML for Claude, Markdown for GPT, plain text for local models).
+ContextBridge turns a conversation into **reviewable, portable, structured memory** that you own:
 
-```
-┌─────────────┐     ┌───────────────┐     ┌──────────────┐
-│  GPT chat   │────▶│ ContextBridge │────▶│ Claude chat  │
-│  (source)   │     │ memory layer  │     │ (target)     │
-└─────────────┘     └───────────────┘     └──────────────┘
-```
+| Step | What happens | Why it matters |
+|---|---|---|
+| **1. Import** | A transcript, ChatGPT export ZIP, saved page, PDF, or Markdown is parsed locally and decomposed into six categories: identity, projects, facts, decisions, open tasks, preferences. Works fully offline with a rule-based extractor, or with an LLM when you want quality over privacy. | Memory becomes data with a schema, not a blob. |
+| **2. Review & redact** | Every item shows its confidence, the source excerpt it came from, and where it came from. Secrets and personal data are masked before storage, transparently. You remove what is wrong; removals are versioned and reversible. | You see and control exactly what will be carried forward. |
+| **3. Retrieve** | Type what you are about to do. Items are scored, and the result shows *which* were selected, their scores, the matched terms, and the estimated tokens saved compared with the full memory or the raw transcript. Tune top-k, categories, minimum score, and a token budget. | No black-box retrieval; no wasted context window. |
+| **4. Export** | The selection is rendered the way the target model prefers (XML for Claude, Markdown for ChatGPT, plain text for Ollama) with a provenance footer, ready to paste. Packages export to a single portable JSON file. | Continuity across tools without vendor lock-in. |
 
-## Three ways to use it
+Plus **merging**: combine several conversations into one working memory. Near-duplicates are folded with their origins preserved; statements that *might* conflict ("deadline is Q3" vs "deadline is Q4") are flagged and both kept for you to decide.
 
-| Surface | What it's for |
-|---|---|
-| **`cb` CLI** | Scripted workflows: export, query, inspect, history, rollback, paste-ready prompts |
-| **Web dashboard** (`localhost:5000`) | Drag-and-drop ChatGPT export ZIPs, PDFs, Markdown, or transcripts; manage packages; attach reference files |
-| **Chrome extension** | A floating button on chatgpt.com / claude.ai that scrapes the open conversation, sends it to the local server, and hands you a paste-ready prompt for the *other* model |
+Everything runs on `127.0.0.1`. The only time a transcript leaves your machine is when you explicitly choose a vendor extraction engine. See [docs/PRIVACY.md](docs/PRIVACY.md).
 
-## Architecture
+### Who it is for
 
-```mermaid
-graph TB
-    subgraph Surfaces
-        CLI["cb CLI (Click + Rich)"]
-        WEB["Web dashboard (Flask)"]
-        EXT["Chrome extension"]
-    end
+* **Developers** carrying architecture decisions and open TODOs between a coding assistant and a chat model.
+* **Researchers and students** keeping experiment constraints, citation preferences, and reading notes consistent across tools.
+* **Knowledge workers** who plan in one assistant and draft in another and are tired of re-briefing.
 
-    subgraph Core["Core engine"]
-        ME["Memory extractor"]
-        LE["Local rule-based extractor"]
-        FP["File parser"]
-        PB["Prompt builder"]
-        MR["Memory retriever"]
-        CP["Context packager"]
-    end
-
-    subgraph Adapters["LLM adapters (LLMInterface ABC)"]
-        OA["OpenAI"]
-        CA["Claude"]
-        LA["Ollama (local)"]
-    end
-
-    subgraph Storage
-        JS["JSON store (versioned packages)"]
-        VS["FAISS vector store"]
-    end
-
-    EXT -->|HTTP| WEB
-    CLI --> ME & MR & PB & CP
-    WEB --> FP & ME & PB & CP
-    FP --> ME
-    ME --> OA & CA & LA
-    ME -.->|no API key| LE
-    MR --> VS
-    MR --> OA & CA & LA
-    CP --> JS
-```
-
-### Structured memory
-
-Every conversation is decomposed into six categories, each item carrying a confidence score and the source quote it came from:
-
-| Category | Captures |
-|---|---|
-| **Identity** | Name, role, background |
-| **Projects** | What's being built, tech stack |
-| **Facts** | Constraints, requirements |
-| **Decisions** | Architectural choices already made |
-| **Open tasks** | Pending TODOs, next steps |
-| **Preferences** | Code style, tooling, communication style |
-
-Extraction runs through whichever LLM adapter you choose. With no API key at all, a **rule-based local extractor** (regex + heuristics) still produces usable memory — less accurate, zero dependencies.
-
-### Retrieval-augmented memory
-
-Rather than injecting the whole package, memory items are embedded and stored in FAISS. A query is embedded, the top-*k* most similar items are selected, and only those go into the prompt.
-
-```
-query ──▶ embed ──▶ FAISS similarity search ──▶ top-k items ──▶ targeted prompt
-```
-
-Claude has no embedding API, so a deterministic hash-based embedding fallback keeps the retriever working without a hard dependency on OpenAI.
-
-### Versioned context packages
-
-Every update produces a new version with a computed diff (`added` / `removed`) and a timestamp. `cb rollback` restores any earlier version without losing history.
-
-```json
-{
-  "name": "my_project",
-  "version": 3,
-  "source_model": "claude",
-  "memory": { "identity": [...], "projects": [...], "decisions": [...] },
-  "history": [
-    { "version": 1, "diff": {}, "timestamp": "..." },
-    { "version": 2, "diff": { "added": [...], "removed": [...] }, "timestamp": "..." }
-  ]
-}
-```
-
-### Model-adaptive prompt formatting
-
-The same package renders differently per target:
-
-- **Claude** → `<context><identity>…</identity><decisions>…</decisions></context>` (XML tags)
-- **GPT** → `## User Identity` / `- …` (Markdown)
-- **Local models** → plain text with numbered lists
-
-### Input formats
-
-The file parser accepts ChatGPT export ZIPs (`conversations.json`), `.txt` transcripts, `.md`, `.pdf` (via PyPDF2), `.json`, and saved `.html` pages.
-
-## Installation
+## Quick start
 
 ```bash
 git clone https://github.com/TirthPatel6104/ContextBridge.git
 cd ContextBridge
-pip install -e ".[dev]"        # core + test tooling
-pip install -e ".[web]"        # add Flask dashboard + PDF parsing
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -e ".[dev,web]"
 ```
 
-Copy `.env.example` to `.env` and add keys for whichever adapters you want:
+No API keys are needed for the default workflow.
 
 ```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-CB_DEFAULT_ADAPTER=openai      # openai | claude | local
-CB_STORAGE_DIR=                # default: ~/.contextbridge
+# 1. Import a conversation (offline rule-based extraction, redaction on)
+cb import experiments/sample_chat.txt -o contextbridge_design
+
+# 2. Review what was extracted (ids let you remove items)
+cb inspect contextbridge_design --ids
+
+# 3. See exactly which items a task would pull in, and why
+cb retrieve contextbridge_design "vector search decisions" --top-k 3
+
+# 4. Get a paste-ready prompt for the next model, scoped to that task
+cb prompt contextbridge_design --model claude --query "vector search decisions" --copy
 ```
 
-The `local` adapter talks to Ollama at `http://localhost:11434` and needs no key.
-
-## Quick start (CLI)
+Then start the dashboard for the same workflow with a UI:
 
 ```bash
-# 1. Extract structured memory from a transcript (GPT does the extraction)
-cb export --model openai --chat conversation.txt --output my_project
-
-# 2. Ask a question on a different model, with only the relevant memory injected
-cb query "continue the system design" --context my_project --model claude
-
-# 3. Generate a paste-ready prompt for the web UI of ChatGPT / Claude
-cb prompt my_project --model claude --copy
-
-# 4. Inspect, audit, and roll back
-cb inspect my_project
-cb history my_project
-cb rollback my_project --version 1
+python -m contextbridge.web.app        # → http://127.0.0.1:5000
 ```
 
-| Command | Description |
+### Demo walkthrough (dashboard)
+
+1. Drop `experiments/sample_chat.txt` on **step 1**, keep *Redact secrets* on, click **Extract memory**. The result shows how many items were extracted and what, if anything, was redacted.
+2. **Step 2** loads the package: each item has a category chip, a confidence bar, its source excerpt, and its origin. Tick a wrong item and click **Remove selected** — the history table gains a new version with a roll-back button.
+3. In **step 3** type `vector search` and click **Preview retrieval**. Each selected item shows its score, the matched terms, and a one-line reason; the stat row shows estimated tokens in the selection versus the full memory and the transcript.
+4. In **step 4** choose *Claude*, scope *Only the retrieval selection*, click **Generate prompt**, then **Copy**. Paste it as your first message in Claude.
+5. Import a second transcript under another name, then use **Merge packages** with *Preview merge* to see folded duplicates and flagged conflicts before saving.
+
+Screenshots and a GIF belong in [docs/screenshots/](docs/screenshots/README.md) (placeholders describe what to capture).
+
+## Three surfaces, one engine
+
+| Surface | Use it for |
 |---|---|
-| `cb export` | Extract structured context from a chat transcript |
-| `cb web-export` | Same, but reads from stdin (paste mode) and targets a specific model |
-| `cb query` | Ask a question with relevant context injected (`--smart` enables retrieval filtering) |
-| `cb prompt` | Render a paste-ready prompt for a target model; `--copy` puts it on the clipboard |
-| `cb list` / `cb inspect` | List packages / view one |
-| `cb history` | Show version history with diffs |
-| `cb rollback` | Restore a previous version |
-| `cb delete` | Delete a package |
+| **`cb` CLI** | Scripted or terminal workflows: import, retrieve, prompt, merge, export/import package files, evaluation |
+| **Dashboard** (`127.0.0.1:5000`) | The guided import → review → retrieve → export workflow, package tools, and the evaluation panel |
+| **Chrome extension** | A floating button on chatgpt.com / claude.ai that sends the open conversation to your local server and hands back a prompt for the other model |
 
-## Web dashboard
+All three call the same `ContextBridgeService`, so behaviour is identical.
 
-```bash
-pip install -e ".[web]"
-python -m contextbridge.web.app      # → http://localhost:5000
+## Architecture
+
+```mermaid
+graph LR
+    subgraph Surfaces
+        CLI["cb CLI"]
+        WEB["Flask dashboard"]
+        EXT["Chrome extension"]
+    end
+    SVC["ContextBridgeService"]
+    subgraph Core
+        EXTR["Extractors<br/>(rules / LLM)"]
+        RED["Redaction"]
+        PKG["Packager<br/>(versions, diffs)"]
+        RET["Retriever<br/>(BM25 + optional embeddings)"]
+        MRG["Merger<br/>(duplicates, conflicts)"]
+        PB["Prompt builder"]
+    end
+    subgraph Storage
+        SQL["SQLite (default)"]
+        JSON["JSON (legacy)"]
+        PORT["Portable export"]
+    end
+    EXT -->|allowed origins only| WEB
+    CLI --> SVC
+    WEB --> SVC
+    SVC --> EXTR --> RED --> PKG --> SQL
+    SVC --> RET
+    SVC --> MRG
+    SVC --> PB
+    PKG --> JSON
+    PKG --> PORT
 ```
 
-Drop a ChatGPT export ZIP, a PDF, or a transcript on the page; pick a source and target model; get a prompt back. Packages, attached files, and a watch folder (`~/.contextbridge/watch`) are managed from the same UI. Available Ollama models are listed automatically.
+Design notes, the data model, and the storage schema are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Data model in one glance
+
+```json
+{
+  "name": "contextbridge_design",
+  "version": 2,
+  "schema_version": 2,
+  "memory": {
+    "decisions": [
+      {
+        "id": "9c1f3e2a7b4d",
+        "category": "decisions",
+        "content": "Using Pydantic for data models and FAISS for vector search",
+        "confidence": 0.7,
+        "source": "rule:decision_keyword",
+        "origin": "sample_chat.txt",
+        "redactions": []
+      }
+    ]
+  },
+  "history": [
+    {"version": 1, "note": "created", "diff": {"added": ["…"], "removed": []}},
+    {"version": 2, "note": "removed during review", "diff": {"added": [], "removed": ["…"]}}
+  ]
+}
+```
+
+Item ids are derived from category + normalised content, so the same statement gets the same id across re-extractions, diffs, and merges.
+
+## Privacy model
+
+* **Local-first by default.** Storage is a SQLite file under `~/.contextbridge`. The dashboard loads no external fonts or scripts and binds to loopback. CORS is limited to the chat sites the extension runs on.
+* **Redaction before storage.** API keys, tokens, JWTs, private keys, credential assignments, card numbers, SSNs, emails, phone numbers, and IP addresses are replaced with `[REDACTED:KIND]` placeholders. The item records only the kind and count. You see the report; your original files are never modified; you can opt out per import.
+* **Nothing is logged that you would not want in a log.** Counts and package names, yes; transcript text, memory content, prompts, and keys, no.
+* **Explicit egress only.** Choosing `openai` or `claude` as an extraction engine sends the transcript to that vendor. `cb query` sends the question and selected memory to the model you name. Nothing else leaves the machine.
+
+Full details: [docs/PRIVACY.md](docs/PRIVACY.md).
+
+## How it evaluates itself
+
+`cb eval` runs an offline suite over bundled fixtures (three labelled transcripts, duplicate pairs, redaction samples). No API calls, deterministic, about a second.
+
+| Metric (v0.2.0) | Value |
+|---|---|
+| Extraction coverage (rule-based extractor) | 100.0% |
+| Retrieval precision@3 / recall@3 / MRR | 76.7% / 93.3% / 86.7% |
+| Duplicate detection F1 | 75.0% |
+| Redaction recall / false positives | 100.0% / 0 |
+| Token savings vs. transcript / vs. full memory | 93.2% / 81.5% |
+
+These numbers describe the offline components on friendly fixtures. Extraction coverage is high *because* the fixtures use explicit phrasing the rules understand; the duplicate score is deliberately conservative (false negatives become flagged conflicts rather than silent merges); one retrieval query fails for the textbook lexical reason (no shared vocabulary). [docs/EVALUATION.md](docs/EVALUATION.md) explains each metric, the misses, and how to add fixtures.
+
+## Configuration
+
+Copy `.env.example` to `.env`. Everything is optional.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CB_STORAGE_DIR` | `~/.contextbridge` | Where packages live |
+| `CB_STORAGE_BACKEND` | `sqlite` | `sqlite` or `json` (legacy per-version files) |
+| `CB_REDACT` | `true` | Redact secrets/PII before storing |
+| `CB_DEFAULT_ADAPTER` | `local` | Default extraction engine |
+| `CB_HOST` / `CB_PORT` | `127.0.0.1` / `5000` | Dashboard bind address |
+| `CB_ALLOWED_ORIGINS` | chatgpt.com, chat.openai.com, claude.ai | Browser origins allowed to call the API |
+| `CB_MAX_UPLOAD_MB` | `25` | Upload size limit |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | — | Only for the matching engine / query target |
+
+Extraction engines: `local` (offline rules), `openai`, `claude`, or any Ollama model name (e.g. `--engine llama3`).
+
+## CLI reference
+
+| Command | What it does |
+|---|---|
+| `cb import FILES… -o NAME [--engine E] [--no-redact] [--mode append\|replace]` | Extract memory from transcripts / exports / PDFs / Markdown |
+| `cb retrieve NAME "query" [-k N] [-c category]… [--budget T] [--min-score S] [--json]` | Explainable retrieval with token savings |
+| `cb prompt NAME --model claude\|openai\|local [-q "query"] [--copy] [--raw]` | Paste-ready prompt, optionally scoped by retrieval |
+| `cb query "question" -c NAME -m MODEL` | Ask a model with relevant memory injected (calls the API) |
+| `cb list` / `cb inspect NAME [--ids]` / `cb history NAME` | Browse packages, items, and versions |
+| `cb remove NAME ID…` / `cb rollback NAME -v N` / `cb delete NAME` | Curate and undo |
+| `cb export-package NAME [-o FILE]` / `cb import-package FILE [--name N] [--overwrite]` | Portable JSON files |
+| `cb merge A B… -o NEW [--dry-run]` | Merge with duplicate folding and conflict flags |
+| `cb scan FILES…` | Preview what redaction would mask, without storing anything |
+| `cb eval [--json]` | Offline evaluation suite |
+| `cb info` / `cb migrate` | Storage details; import legacy JSON packages into SQLite |
+
+`cb export` and `cb web-export` remain as aliases from 0.1.
 
 ## Chrome extension
 
-1. Start the web dashboard (the extension talks to `localhost:5000`).
-2. `chrome://extensions` → enable *Developer mode* → *Load unpacked* → select the `extension/` folder.
-3. Open a conversation on chatgpt.com or claude.ai and click the floating ContextBridge button.
-
-The content script scrapes the visible conversation from the DOM, posts it to `/api/extract`, and shows a paste-ready prompt formatted for the *other* model.
-
-## Project structure
-
-```
-contextbridge/
-├── models.py              # Pydantic models: MemoryItem, StructuredMemory, ContextPackage
-├── cli.py                 # Click CLI with Rich output
-├── core/
-│   ├── llm_interface.py   # Abstract LLM contract (send / embed)
-│   ├── memory.py          # LLM-powered structured memory extractor
-│   ├── local_extractor.py # Offline rule-based extractor (no API key)
-│   ├── file_parser.py     # ZIP / TXT / MD / PDF / JSON / HTML → text
-│   ├── packager.py        # Versioned packages, diffs, rollback
-│   ├── prompt_builder.py  # Model-adaptive prompt formatting
-│   └── retriever.py       # Semantic retrieval over memory items
-├── adapters/
-│   ├── openai_adapter.py
-│   ├── claude_adapter.py
-│   └── local_adapter.py   # Ollama
-├── storage/
-│   ├── base.py            # Storage interface
-│   ├── json_store.py      # File-based package store
-│   └── vector_store.py    # FAISS index
-└── web/                   # Flask dashboard (app.py, templates/, static/)
-extension/                 # Chrome MV3 extension (content script + widget)
-tests/                     # 41 tests, all against a mock adapter — no API keys needed
-experiments/               # Sample transcripts
-```
+1. Start the dashboard (the extension talks to `localhost:5000`).
+2. `chrome://extensions` → *Developer mode* → *Load unpacked* → select `extension/`.
+3. On chatgpt.com or claude.ai, click the floating button, name the package, and click **Extract this chat**. The status line reports how many items were extracted and what was redacted. **Copy prompt** gives you the prompt for the other model; files you attach in the panel are included because you attached them, nothing else is.
 
 ## Development
 
 ```bash
-pytest -q                          # 41 tests
-ruff check contextbridge tests
+pytest -q                              # 201 tests, all offline (mock adapter, temp SQLite)
+ruff check contextbridge tests         # lint
+ruff format --check contextbridge tests
+cb eval                                # evaluation suite
 ```
 
-CI runs lint + tests on Python 3.11 and 3.12.
+CI runs all four on Python 3.11, 3.12, and 3.13.
 
-## Design decisions
+Project layout:
 
-| Decision | Why |
-|---|---|
-| Pydantic models for everything | Validation, typing, and JSON round-tripping for free |
-| Abstract `LLMInterface` + adapters | Swap providers without touching core logic; tests run against a mock |
-| FAISS for retrieval | Fast local similarity search, no external service |
-| Hash-based embedding fallback | Claude has no embedding API; keeps retrieval working without OpenAI |
-| Versioned packages with diffs | Full audit trail; rollback never destroys data |
-| Per-model prompt formatting | Each model family responds better to its own conventions |
-| Rule-based extractor | A working offline path when no LLM is available |
+```
+contextbridge/
+├── models.py            # Pydantic schema: MemoryItem (id, origin, redactions), ContextPackage, RetrievalResult
+├── config.py            # Settings from CB_* env vars
+├── validation.py        # Package names, file names, sizes
+├── service.py           # ContextBridgeService: the one place the pieces are wired
+├── cli.py               # Click CLI
+├── core/                # extractors, redaction, packager, retriever, merger, prompt_builder, tokens
+├── adapters/            # OpenAI, Claude, Ollama (LLMInterface)
+├── storage/             # SQLiteStore, JSONStore, portable export/import, VectorStore
+├── evaluation/          # runner + fixtures
+└── web/                 # Flask app factory, templates, static
+extension/               # Chrome MV3 content script
+tests/                   # 201 tests
+docs/                    # ARCHITECTURE, PRIVACY, EVALUATION, screenshots
+```
 
-## Status and roadmap
+## Upgrading from 0.1
 
-This is an alpha (v0.1). The core loop — extract → package → retrieve → inject — works end to end across the CLI, dashboard, and extension.
+Nothing to do for most users. On first run the SQLite backend imports every JSON package (all versions) from `~/.contextbridge` and leaves the JSON files in place. `cb migrate` runs the same import explicitly and reports what it did; `cb info` shows where data lives. `CB_STORAGE_BACKEND=json` keeps the old behaviour. Note that `--engine local` / `--model local` for *extraction* now means the offline rule-based extractor everywhere (the dashboard already worked this way); use an Ollama model name for local LLM extraction. Details in [CHANGELOG.md](CHANGELOG.md).
 
-- [x] OpenAI, Claude, and Ollama adapters
-- [x] Web dashboard with file upload
-- [x] Chrome extension for chatgpt.com / claude.ai
-- [ ] Quantitative evaluation: token savings, context recall, retrieval precision, cross-model consistency
-- [ ] SQLite storage backend
-- [ ] Multi-conversation merging
-- [ ] Streaming extraction for long transcripts
+## Roadmap
+
+Implemented in 0.2.0:
+
+- [x] SQLite storage with automatic, non-destructive migration from JSON
+- [x] Portable package export/import
+- [x] Explainable retrieval: scores, matched terms, reasons, category filters, top-k, token budgets, token-savings estimates
+- [x] Secrets/PII redaction with transparent reporting
+- [x] Multi-package merge with duplicate folding and conflict flags
+- [x] Review workflow with per-item provenance, versioned removals, rollback
+- [x] Offline evaluation suite wired into CLI, API, dashboard, and CI
+- [x] Input validation, restricted CORS, loopback binding, no content in logs
+
+Planned (not yet implemented):
+
+- [ ] Recorded-fixture evaluation of LLM extractors (grade saved outputs offline)
+- [ ] Local semantic embeddings (e.g. a small sentence-transformer) so the offline path is not purely lexical
+- [ ] Item editing in the review step (currently: remove, re-import, or merge)
+- [ ] Streaming / chunked extraction for very long transcripts
+- [ ] Extension: select which items to include before copying
 
 ## License
 
