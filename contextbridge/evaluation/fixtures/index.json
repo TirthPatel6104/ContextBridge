@@ -1,0 +1,8 @@
+{
+  "description": "Hand-labelled fixtures for the offline evaluation suite. Transcripts are synthetic and contain no real personal data.",
+  "transcripts": [
+    "backend_migration.json",
+    "thesis_research.json",
+    "product_launch.json"
+  ]
+}

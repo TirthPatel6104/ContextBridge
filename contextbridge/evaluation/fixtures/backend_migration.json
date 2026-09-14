@@ -1,0 +1,21 @@
+{
+  "id": "backend_migration",
+  "title": "Developer migrating a payments service",
+  "transcript": "User: Hi, I'm Priya. I'm a backend engineer at a fintech startup and I need help planning a migration.\n\nAssistant: Happy to help, Priya. What are you migrating?\n\nUser: I'm building a payments reconciliation service in Python. It currently runs on Flask with SQLite, which is not going to hold up.\n\nAssistant: Understood. What have you settled on for the new stack?\n\nUser: I decided to use PostgreSQL instead of SQLite for production. I prefer SQLAlchemy 2.0 style with typed models rather than raw SQL.\n\nAssistant: Good choices. PostgreSQL gives you proper concurrency and SQLAlchemy 2.0 has much better typing support. Any hard constraints?\n\nUser: The requirement is that every ledger entry must be idempotent, because upstream webhooks can be delivered twice.\n\nAssistant: Then an idempotency key column with a unique constraint is the standard approach. Where are you in the migration?\n\nUser: The schema design is done. I still need to write the Alembic migration for the ledger table and backfill the historical rows.\n\nAssistant: Let's outline the migration steps then. Is there a timeline?\n\nUser: The deadline is the end of Q3, so I have about six weeks.\n\nAssistant: That is workable. I'll draft the Alembic revision and a backfill script next.",
+  "gold_items": [
+    {"category": "identity", "content": "Priya is a backend engineer at a fintech startup", "keywords": ["priya"]},
+    {"category": "projects", "content": "Building a payments reconciliation service in Python", "keywords": ["reconciliation"]},
+    {"category": "decisions", "content": "Use PostgreSQL instead of SQLite for production", "keywords": ["postgresql"]},
+    {"category": "preferences", "content": "Prefers SQLAlchemy 2.0 style with typed models", "keywords": ["sqlalchemy"]},
+    {"category": "facts", "content": "Every ledger entry must be idempotent because webhooks can be delivered twice", "keywords": ["idempotent"]},
+    {"category": "open_tasks", "content": "Write the Alembic migration for the ledger table and backfill historical rows", "keywords": ["alembic"]},
+    {"category": "facts", "content": "Deadline is the end of Q3 (about six weeks)", "keywords": ["deadline", "q3"]}
+  ],
+  "queries": [
+    {"query": "which database are we using in production", "relevant_gold": [2]},
+    {"query": "what is left to do on the ledger migration", "relevant_gold": [5]},
+    {"query": "when is the deadline", "relevant_gold": [6]},
+    {"query": "ORM style preference for models", "relevant_gold": [3]},
+    {"query": "why must ledger entries be idempotent", "relevant_gold": [4]}
+  ]
+}
