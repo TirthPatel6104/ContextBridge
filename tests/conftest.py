@@ -11,12 +11,15 @@ import json
 
 import pytest
 
+from contextbridge.config import Settings
 from contextbridge.core.llm_interface import LLMInterface
 from contextbridge.models import (
     MemoryCategory,
     MemoryItem,
     StructuredMemory,
 )
+from contextbridge.service import ContextBridgeService
+from contextbridge.storage.sqlite_store import SQLiteStore
 
 # ---------------------------------------------------------------------------
 # Mock LLM Adapter
@@ -185,3 +188,29 @@ def sample_memory() -> StructuredMemory:
     )
 
 
+# ---------------------------------------------------------------------------
+# Service / app fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def settings(tmp_path) -> Settings:
+    return Settings(storage_dir=tmp_path, storage_backend="sqlite")
+
+
+@pytest.fixture
+def service(tmp_path, settings):
+    store = SQLiteStore(base_dir=tmp_path)
+    svc = ContextBridgeService(store, settings=settings)
+    yield svc
+    store.close()
+
+
+@pytest.fixture
+def client(service, settings):
+    from contextbridge.web.app import create_app
+
+    app = create_app(settings, store=service.store, service=service)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
