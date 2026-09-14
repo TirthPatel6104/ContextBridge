@@ -1,7 +1,12 @@
-"""Shared test fixtures for ContextBridge."""
+"""Shared test fixtures for ContextBridge.
+
+Everything runs offline: the mock adapter returns canned responses and
+hash-based embeddings, and every store lives in a pytest temp directory.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -21,9 +26,12 @@ from contextbridge.models import (
 class MockAdapter(LLMInterface):
     """Mock adapter for testing — returns deterministic responses."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, semantic: bool = True, fail_embeddings: bool = False) -> None:
         self._send_response = ""
         self._embed_dimension = 256
+        self.semantic_embeddings = semantic
+        self.fail_embeddings = fail_embeddings
+        self.embed_calls = 0
 
     @property
     def name(self) -> str:
@@ -43,14 +51,14 @@ class MockAdapter(LLMInterface):
         return f"Summary: {text[:100]}"
 
     async def embed(self, text: str) -> list[float]:
-        import hashlib
-
+        self.embed_calls += 1
+        if self.fail_embeddings:
+            raise RuntimeError("embeddings unavailable")
         h = hashlib.sha256(text.encode()).digest()
         vec: list[float] = []
         seed = h
         while len(vec) < self._embed_dimension:
             seed = hashlib.sha256(seed).digest()
-            # Map bytes to [-1, 1] range to avoid overflow
             vec.extend((b / 127.5 - 1.0) for b in seed)
         vec = vec[: self._embed_dimension]
         norm = sum(v * v for v in vec) ** 0.5
@@ -75,6 +83,11 @@ SAMPLE_CHAT = (
     "User: I decided to use Pydantic for data models and FAISS for vector search.\n\n"
     "Assistant: Good choices. Next we should implement the CLI.\n\n"
     "User: Yes, and I still need to write the evaluation experiments."
+)
+
+SAMPLE_CHAT_WITH_SECRETS = (
+    SAMPLE_CHAT + "\n\nUser: I decided to use the key sk-proj-abc123def456ghi789jkl012mno345pqr678 "
+    "and you can email me at tirth@example.com."
 )
 
 SAMPLE_EXTRACTION_RESPONSE = json.dumps(
@@ -152,8 +165,16 @@ def sample_memory() -> StructuredMemory:
             MemoryItem(category=MemoryCategory.FACTS, content="Tech stack: Python with FastAPI")
         ],
         decisions=[
-            MemoryItem(category=MemoryCategory.DECISIONS, content="Using Pydantic for data models"),
-            MemoryItem(category=MemoryCategory.DECISIONS, content="Using FAISS for vector search"),
+            MemoryItem(
+                category=MemoryCategory.DECISIONS,
+                content="Using Pydantic for data models",
+                source="I decided to use Pydantic",
+            ),
+            MemoryItem(
+                category=MemoryCategory.DECISIONS,
+                content="Using FAISS for vector search",
+                confidence=0.9,
+            ),
         ],
         open_tasks=[
             MemoryItem(category=MemoryCategory.OPEN_TASKS, content="Write evaluation experiments")
@@ -162,3 +183,5 @@ def sample_memory() -> StructuredMemory:
             MemoryItem(category=MemoryCategory.PREFERENCES, content="Prefers clean architecture")
         ],
     )
+
+
