@@ -1,0 +1,34 @@
+{
+  "description": "Synthetic secrets and PII for measuring redaction recall, plus clean text for false positives. All values are fake.",
+  "positives": [
+    {"text": "You can reach me at priya.sharma@example-fintech.com for the review.", "expected_kinds": ["email"]},
+    {"text": "My number is +1 415-555-0142 if the deploy fails.", "expected_kinds": ["phone"]},
+    {"text": "Call the on-call line on (020) 7946 0958 after hours.", "expected_kinds": ["phone"]},
+    {"text": "Here is the key: sk-proj-abc123def456ghi789jkl012mno345pqr678", "expected_kinds": ["api_key"]},
+    {"text": "Anthropic key sk-ant-api03-Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lz for testing.", "expected_kinds": ["api_key"]},
+    {"text": "GitHub token ghp_1234567890abcdefghijklmnopqrstuvwxyzAB was rotated.", "expected_kinds": ["api_key"]},
+    {"text": "AWS access key AKIAIOSFODNN7EXAMPLE is in the old config.", "expected_kinds": ["api_key"]},
+    {"text": "Slack bot token xoxb-1234567890-abcdefghijkl-mnopqrstuvwx should be revoked.", "expected_kinds": ["api_key"]},
+    {"text": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "expected_kinds": ["jwt"]},
+    {"text": "Test card 4111 1111 1111 1111 expires next year.", "expected_kinds": ["credit_card"]},
+    {"text": "The SSN on the form was 123-45-6789.", "expected_kinds": ["ssn"]},
+    {"text": "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----", "expected_kinds": ["private_key"]},
+    {"text": "Set password = Tr0ub4dor&3xyz in the env file.", "expected_kinds": ["credential_assignment"]},
+    {"text": "The database url is postgres://app:S3cretPassw0rd@db.internal:5432/ledger", "expected_kinds": ["credential_url"]},
+    {"text": "The staging box is 10.20.30.40 behind the VPN.", "expected_kinds": ["ip_address"]},
+    {"text": "Email dana@example.org or call 555-123-4567.", "expected_kinds": ["email", "phone"]},
+    {"text": "api_key: 9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c", "expected_kinds": ["credential_assignment"]}
+  ],
+  "negatives": [
+    {"text": "We upgraded to Python 3.11.4 and pydantic 2.5.0 last week."},
+    {"text": "The launch is scheduled for 2024-10-14."},
+    {"text": "Order #12345678 shipped yesterday."},
+    {"text": "The service listens on port 8080 and the health check returns 200."},
+    {"text": "Pi is roughly 3.14159 and e is 2.71828."},
+    {"text": "The commit hash is a1b2c3d and the PR number is 4521."},
+    {"text": "Our test coverage went from 71% to 88%."},
+    {"text": "The meeting is at 10:30 in room 204."},
+    {"text": "Version v1.2.3 fixed the regression from v1.2.2."},
+    {"text": "Set the token budget to 1500 tokens for the prompt."}
+  ]
+}
