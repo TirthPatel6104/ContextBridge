@@ -14,6 +14,11 @@ class LLMInterface(ABC):
     depend on a specific provider.
     """
 
+    #: Whether :meth:`embed` returns *semantic* vectors.  Adapters that fall
+    #: back to hash-based pseudo-embeddings must set this to ``False`` so the
+    #: retriever does not blend noise into its scores.
+    semantic_embeddings: bool = True
+
     # Informational ---------------------------------------------------------
 
     @property

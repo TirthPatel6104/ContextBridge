@@ -13,6 +13,10 @@ class LocalAdapter(LLMInterface):
 
     Expects Ollama to be running on localhost:11434 (default).
     Supports any model pulled via `ollama pull <model>`.
+
+    Embeddings are only semantic when the configured model supports the
+    ``/api/embeddings`` endpoint; failures return an empty list, which the
+    retriever treats as "no embeddings" and falls back to lexical scoring.
     """
 
     def __init__(self, model: str = "llama3", base_url: str = "http://localhost:11434") -> None:
