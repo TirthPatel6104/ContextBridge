@@ -1,165 +1,306 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ContextBridge — Cross-Model Memory Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ContextBridge — portable, privacy-conscious working memory for moving work between ChatGPT, Claude, and local models.">
+  <title>ContextBridge — Portable AI working memory</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
-
 <body>
-    <!-- Header -->
-    <header class="header">
-        <div class="header-left">
-            <span class="logo">&#x1F309;</span>
-            <h1>ContextBridge</h1>
-            <span class="badge">v0.1.0</span>
-        </div>
-        <p class="tagline">Drop your files &bull; Extract memory &bull; Paste into any AI</p>
-    </header>
+  <a class="skip-link" href="#main">Skip to content</a>
 
-    <main class="container">
-        <!-- ===== STEP 1: DROP FILES ===== -->
-        <section class="card extract-card">
-            <div class="card-header">
-                <div>
-                    <h2><span class="step-badge">1</span> Drop Your Files</h2>
-                    <p class="subtitle">ChatGPT exports, PDFs, documents, chat logs &mdash; drop everything</p>
-                </div>
-            </div>
-
-            <!-- Drop Zone -->
-            <div class="drop-zone" id="drop-zone">
-                <div class="drop-zone-content">
-                    <div class="drop-zone-icon">&#x1F4C1;</div>
-                    <p class="drop-zone-title">Drag &amp; drop files here</p>
-                    <p class="drop-zone-subtitle">or <button class="link-btn"
-                            onclick="document.getElementById('file-input').click()">browse files</button></p>
-                    <div class="supported-formats">
-                        <span class="format-tag">.zip (ChatGPT Export)</span>
-                        <span class="format-tag">.pdf</span>
-                        <span class="format-tag">.txt</span>
-                        <span class="format-tag">.json</span>
-                        <span class="format-tag">.html</span>
-                        <span class="format-tag">.md</span>
-                    </div>
-                </div>
-                <input type="file" id="file-input" multiple accept=".zip,.pdf,.txt,.json,.html,.htm,.md,.text,.log"
-                    hidden>
-            </div>
-
-            <!-- File List -->
-            <div id="file-list" class="file-list" style="display:none;">
-                <div class="file-list-header">
-                    <span id="file-count">0 files selected</span>
-                    <button class="btn btn-sm btn-ghost" onclick="clearFiles()">Clear All</button>
-                </div>
-                <div id="file-items"></div>
-            </div>
-
-            <!-- Config -->
-            <div class="form-row" id="extract-config" style="display:none;">
-                <div class="form-group">
-                    <label for="package-name">Package Name</label>
-                    <input type="text" id="package-name" placeholder="e.g. my_project" autocomplete="off">
-                </div>
-                <div class="form-group">
-                    <label for="source-model">Extraction Engine</label>
-                    <select id="source-model">
-                        <option value="openai">OpenAI (needs API key)</option>
-                        <option value="claude">Claude (needs API key)</option>
-                        <optgroup label="Local (Ollama)" id="ollama-models">
-                            <option value="local" selected>Detecting models...</option>
-                        </optgroup>
-                    </select>
-                </div>
-            </div>
-
-            <button class="btn btn-primary btn-lg" id="extract-btn" style="display:none;" onclick="extractContext()">
-                <span class="btn-icon">&#x26A1;</span> Extract Memory from Files
-            </button>
-
-            <!-- Extraction Results -->
-            <div id="extract-results" class="results-panel" style="display:none;">
-                <div class="results-header">
-                    <h3>&#x2705; Extraction Complete</h3>
-                    <span id="results-meta" class="meta"></span>
-                </div>
-                <div id="files-processed" class="files-processed"></div>
-                <div id="memory-grid" class="memory-grid"></div>
-            </div>
-        </section>
-
-        <!-- ===== STEP 2: GENERATE PROMPT ===== -->
-        <section class="card prompt-card">
-            <div class="card-header">
-                <div>
-                    <h2><span class="step-badge">2</span> Generate Prompt for Web UI</h2>
-                    <p class="subtitle">One click &rarr; paste into Claude or ChatGPT web</p>
-                </div>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="prompt-package">Context Package</label>
-                    <select id="prompt-package">
-                        <option value="">Select a package</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="target-model">Target (paste into)</label>
-                    <select id="target-model">
-                        <option value="claude">Claude Web</option>
-                        <option value="openai">ChatGPT Web</option>
-                    </select>
-                </div>
-            </div>
-
-            <button class="btn btn-accent btn-lg" id="prompt-btn" onclick="generatePrompt()">
-                <span class="btn-icon">&#x1F3AF;</span> Generate &amp; Copy to Clipboard
-            </button>
-
-            <!-- Generated Prompt -->
-            <div id="prompt-results" class="results-panel" style="display:none;">
-                <div class="results-header">
-                    <h3 id="prompt-target-label">Ready for Claude</h3>
-                    <button class="btn btn-sm btn-copy" onclick="copyPrompt()">
-                        <span id="copy-icon">&#x1F4CB;</span> <span id="copy-text">Copy to Clipboard</span>
-                    </button>
-                </div>
-                <pre id="prompt-output" class="prompt-box"></pre>
-                <div class="paste-instructions">
-                    <p><strong>Open Claude/ChatGPT web &rarr; Ctrl+V &rarr; Send</strong></p>
-                </div>
-            </div>
-        </section>
-
-        <!-- ===== SAVED PACKAGES ===== -->
-        <section class="card packages-card">
-            <div class="card-header">
-                <div>
-                    <h2>&#x1F4E6; Saved Packages</h2>
-                </div>
-                <button class="btn btn-sm btn-ghost" onclick="loadPackages()">&#x1F504; Refresh</button>
-            </div>
-            <div id="packages-list" class="packages-list">
-                <p class="empty-state">Loading...</p>
-            </div>
-        </section>
-    </main>
-
-    <!-- Loading Overlay -->
-    <div id="loading-overlay" class="loading-overlay" style="display:none;">
-        <div class="spinner"></div>
-        <p id="loading-text">Extracting structured memory...</p>
+  <header class="site-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🌉</span>
+      <div>
+        <h1>ContextBridge</h1>
+        <p class="tagline">Carry your working context between ChatGPT, Claude, and local models — without re-explaining it.</p>
+      </div>
     </div>
+    <dl class="status-strip" aria-label="Local status">
+      <div><dt>Version</dt><dd id="status-version">{{ version }}</dd></div>
+      <div><dt>Storage</dt><dd id="status-storage">…</dd></div>
+      <div><dt>Redaction</dt><dd id="status-redaction">…</dd></div>
+      <div><dt>Data</dt><dd>stays on this machine</dd></div>
+    </dl>
+  </header>
 
-    <!-- Toast -->
-    <div id="toast" class="toast" style="display:none;"></div>
+  <nav class="stepper" aria-label="Workflow">
+    <ol>
+      <li><a href="#import"><span class="step-num">1</span> Import</a></li>
+      <li><a href="#review"><span class="step-num">2</span> Review &amp; redact</a></li>
+      <li><a href="#retrieve"><span class="step-num">3</span> Retrieve &amp; preview</a></li>
+      <li><a href="#export"><span class="step-num">4</span> Export to a model</a></li>
+    </ol>
+  </nav>
 
-    <script src="/static/app.js"></script>
+  <main id="main" class="container">
+
+    <!-- ================= 1. IMPORT ================= -->
+    <section class="card" id="import" aria-labelledby="import-title">
+      <header class="card-header">
+        <h2 id="import-title"><span class="step-badge" aria-hidden="true">1</span> Import a conversation</h2>
+        <p class="subtitle">ChatGPT export ZIPs, saved pages, PDFs, Markdown, or plain transcripts. Parsed locally.</p>
+      </header>
+
+      <div class="drop-zone" id="drop-zone" role="button" tabindex="0" aria-describedby="drop-help">
+        <p class="drop-zone-title">Drop files here or <span class="link-like">browse</span></p>
+        <p id="drop-help" class="drop-zone-subtitle">.zip · .json · .txt · .md · .pdf · .html — up to <span id="max-upload">25</span> MB</p>
+        <input type="file" id="file-input" multiple accept=".zip,.pdf,.txt,.json,.html,.htm,.md,.markdown,.text,.log" class="visually-hidden" aria-label="Choose files">
+      </div>
+
+      <ul id="file-list" class="file-list" aria-label="Selected files" hidden></ul>
+
+      <form id="import-form" class="form-grid" hidden novalidate>
+        <div class="form-group">
+          <label for="package-name">Package name</label>
+          <input type="text" id="package-name" name="package_name" list="package-names" autocomplete="off" required
+                 pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" placeholder="e.g. thesis_or_project_name"
+                 aria-describedby="package-name-help">
+          <datalist id="package-names"></datalist>
+          <p id="package-name-help" class="help">Letters, digits, <code>_</code> <code>-</code> <code>.</code> — existing names are appended to.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="engine">Extraction engine</label>
+          <select id="engine" name="model">
+            <option value="local" selected>Offline rules (no data leaves this machine)</option>
+            <option value="openai">OpenAI (sends transcript to OpenAI; needs key)</option>
+            <option value="claude">Claude (sends transcript to Anthropic; needs key)</option>
+            <optgroup label="Local Ollama models" id="ollama-models"></optgroup>
+          </select>
+        </div>
+
+        <fieldset class="form-group span-2">
+          <legend>Privacy</legend>
+          <label class="check">
+            <input type="checkbox" id="redact" name="redact" checked>
+            <span>Redact secrets and personal data before storing <span class="muted">(API keys, tokens, emails, phone numbers, card numbers…)</span></span>
+          </label>
+          <p class="help">Redaction replaces values with <code>[REDACTED:KIND]</code> placeholders and records only the kind. Your original files are never modified.</p>
+        </fieldset>
+
+        <fieldset class="form-group span-2">
+          <legend>If the package already exists</legend>
+          <label class="radio"><input type="radio" name="mode" value="append" checked> Append new items</label>
+          <label class="radio"><input type="radio" name="mode" value="replace"> Replace its memory (previous versions are kept)</label>
+        </fieldset>
+
+        <div class="form-actions span-2">
+          <button type="submit" class="btn btn-primary" id="extract-btn">Extract memory</button>
+          <button type="button" class="btn btn-ghost" id="clear-files-btn">Clear files</button>
+        </div>
+      </form>
+
+      <p id="import-error" class="inline-error" role="alert" hidden></p>
+
+      <div id="import-result" class="result-panel" hidden>
+        <h3>Extraction complete</h3>
+        <p id="import-summary" class="summary-line"></p>
+        <ul id="import-warnings" class="warning-list" hidden></ul>
+        <div id="import-redaction" class="redaction-report" hidden></div>
+        <p class="help">Continue to <a href="#review">step 2</a> to review every item, or <a href="#retrieve">step 3</a> to preview retrieval.</p>
+      </div>
+    </section>
+
+    <!-- ================= 2. REVIEW ================= -->
+    <section class="card" id="review" aria-labelledby="review-title">
+      <header class="card-header">
+        <h2 id="review-title"><span class="step-badge" aria-hidden="true">2</span> Review extracted memory</h2>
+        <p class="subtitle">Every item shows its category, confidence, source excerpt, and where it came from. Remove anything wrong — removals create a new version you can roll back.</p>
+      </header>
+
+      <div class="toolbar">
+        <div class="form-group">
+          <label for="active-package">Package</label>
+          <select id="active-package" aria-describedby="active-package-help">
+            <option value="">— choose a package —</option>
+          </select>
+          <p id="active-package-help" class="help visually-hidden">Selecting a package loads it into every step below.</p>
+        </div>
+        <div class="toolbar-actions">
+          <button type="button" class="btn btn-ghost" id="refresh-packages-btn">Refresh</button>
+          <button type="button" class="btn btn-danger-ghost" id="remove-selected-btn" disabled>Remove selected</button>
+        </div>
+      </div>
+
+      <p id="review-empty" class="empty-state">No package selected. Import a conversation above or pick one from the list.</p>
+      <p id="review-error" class="inline-error" role="alert" hidden></p>
+
+      <div id="review-body" hidden>
+        <p id="review-meta" class="summary-line"></p>
+        <div id="memory-groups" class="memory-groups"></div>
+
+        <details class="history">
+          <summary>Version history</summary>
+          <table class="table" id="history-table" aria-label="Version history">
+            <thead><tr><th scope="col">Version</th><th scope="col">When</th><th scope="col">Source</th><th scope="col">Note</th><th scope="col">Added</th><th scope="col">Removed</th><th scope="col"></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </details>
+      </div>
+    </section>
+
+    <!-- ================= 3. RETRIEVE ================= -->
+    <section class="card" id="retrieve" aria-labelledby="retrieve-title">
+      <header class="card-header">
+        <h2 id="retrieve-title"><span class="step-badge" aria-hidden="true">3</span> Retrieve only what matters</h2>
+        <p class="subtitle">Type what you are about to work on. ContextBridge scores every memory item and shows exactly why each one was picked.</p>
+      </header>
+
+      <form id="retrieve-form" class="form-grid" novalidate>
+        <div class="form-group span-2">
+          <label for="query">What are you about to do?</label>
+          <input type="search" id="query" name="query" placeholder="e.g. write the database migration" autocomplete="off">
+        </div>
+        <div class="form-group">
+          <label for="top-k">Max items (top-k)</label>
+          <input type="number" id="top-k" name="top_k" min="1" max="100" value="5">
+        </div>
+        <div class="form-group">
+          <label for="token-budget">Token budget <span class="muted">(optional)</span></label>
+          <input type="number" id="token-budget" name="token_budget" min="1" placeholder="e.g. 300">
+        </div>
+        <div class="form-group">
+          <label for="min-score">Minimum score: <output id="min-score-out" for="min-score">0.00</output></label>
+          <input type="range" id="min-score" name="min_score" min="0" max="1" step="0.05" value="0">
+        </div>
+        <fieldset class="form-group">
+          <legend>Categories</legend>
+          <div class="chip-row" id="category-filters"></div>
+        </fieldset>
+        <div class="form-actions span-2">
+          <button type="submit" class="btn btn-primary" id="retrieve-btn">Preview retrieval</button>
+        </div>
+      </form>
+
+      <p id="retrieve-error" class="inline-error" role="alert" hidden></p>
+      <p id="retrieve-empty" class="empty-state">Select a package and run a query to see which items would be included.</p>
+
+      <div id="retrieve-result" hidden>
+        <dl class="stat-row" aria-label="Retrieval statistics">
+          <div><dt>Selected</dt><dd id="stat-selected">–</dd></div>
+          <div><dt>Method</dt><dd id="stat-method">–</dd></div>
+          <div><dt>Est. tokens in selection</dt><dd id="stat-tokens">–</dd></div>
+          <div><dt>Est. saved vs. full memory</dt><dd id="stat-saved">–</dd></div>
+          <div><dt>Est. saved vs. transcript</dt><dd id="stat-saved-transcript">–</dd></div>
+        </dl>
+        <p class="help">Token figures are estimates (≈4 characters per token); no vendor tokenizer is called.</p>
+        <ol id="retrieve-list" class="retrieve-list" aria-label="Selected memory items"></ol>
+        <p id="retrieve-dropped" class="help"></p>
+      </div>
+    </section>
+
+    <!-- ================= 4. EXPORT ================= -->
+    <section class="card" id="export" aria-labelledby="export-title">
+      <header class="card-header">
+        <h2 id="export-title"><span class="step-badge" aria-hidden="true">4</span> Export to the next model</h2>
+        <p class="subtitle">Formatted the way each model prefers: XML for Claude, Markdown for ChatGPT, plain text for local models.</p>
+      </header>
+
+      <form id="prompt-form" class="form-grid" novalidate>
+        <div class="form-group">
+          <label for="target-model">Target</label>
+          <select id="target-model" name="target_model">
+            <option value="claude">Claude</option>
+            <option value="openai">ChatGPT</option>
+            <option value="local">Local model (Ollama)</option>
+          </select>
+        </div>
+        <fieldset class="form-group">
+          <legend>Scope</legend>
+          <label class="radio"><input type="radio" name="scope" value="full" checked> Whole package</label>
+          <label class="radio"><input type="radio" name="scope" value="retrieval"> Only the retrieval selection from step 3</label>
+        </fieldset>
+        <label class="check span-2">
+          <input type="checkbox" id="include-files" name="include_files">
+          <span>Include files attached to this package <span class="muted">(off by default — full file contents go into the prompt)</span></span>
+        </label>
+        <div class="form-actions span-2">
+          <button type="submit" class="btn btn-primary" id="prompt-btn">Generate prompt</button>
+          <button type="button" class="btn btn-ghost" id="copy-btn" disabled>Copy to clipboard</button>
+        </div>
+      </form>
+
+      <p id="prompt-error" class="inline-error" role="alert" hidden></p>
+      <div id="prompt-result" hidden>
+        <p id="prompt-meta" class="summary-line"></p>
+        <label for="prompt-output" class="visually-hidden">Generated prompt</label>
+        <textarea id="prompt-output" class="prompt-box" readonly rows="14" spellcheck="false"></textarea>
+        <p class="help">Paste it as your first message in the target chat, then continue working.</p>
+      </div>
+
+      <hr class="divider">
+
+      <h3>Package tools</h3>
+      <div class="tool-grid">
+        <div class="tool">
+          <h4>Portable file</h4>
+          <p class="help">A single JSON file containing the memory, provenance, and version history.</p>
+          <div class="tool-actions">
+            <a class="btn btn-ghost" id="export-link" href="#" download hidden>Download package JSON</a>
+            <label class="btn btn-ghost file-btn">Import package JSON<input type="file" id="import-package-input" accept=".json" class="visually-hidden"></label>
+          </div>
+          <p id="tools-status" class="help" aria-live="polite"></p>
+        </div>
+
+        <div class="tool">
+          <h4>Merge packages</h4>
+          <p class="help">Combine several conversations. Near-duplicates are folded (origins kept) and possible conflicts are flagged, never dropped.</p>
+          <form id="merge-form" class="stack" novalidate>
+            <label for="merge-sources">Sources (choose two or more)</label>
+            <select id="merge-sources" multiple size="4" aria-describedby="merge-help"></select>
+            <p id="merge-help" class="help">Hold Ctrl / Cmd to select several.</p>
+            <label for="merge-name">New package name</label>
+            <input type="text" id="merge-name" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}" placeholder="combined_context">
+            <div class="tool-actions">
+              <button type="submit" class="btn btn-ghost" data-dry="1">Preview merge</button>
+              <button type="submit" class="btn btn-primary" data-dry="0">Merge &amp; save</button>
+            </div>
+          </form>
+          <p id="merge-error" class="inline-error" role="alert" hidden></p>
+          <div id="merge-result" class="merge-result" hidden></div>
+        </div>
+
+        <div class="tool">
+          <h4>Danger zone</h4>
+          <p class="help">Deleting removes every version of the selected package from local storage.</p>
+          <button type="button" class="btn btn-danger" id="delete-package-btn" disabled>Delete selected package</button>
+          <div id="delete-confirm" class="confirm" hidden>
+            <p>Delete <strong id="delete-name"></strong>? This cannot be undone.</p>
+            <button type="button" class="btn btn-danger" id="delete-yes">Yes, delete</button>
+            <button type="button" class="btn btn-ghost" id="delete-no">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= QUALITY ================= -->
+    <section class="card" id="quality" aria-labelledby="quality-title">
+      <header class="card-header">
+        <h2 id="quality-title">How well does this work?</h2>
+        <p class="subtitle">A reproducible offline evaluation over bundled fixtures. No API calls, no invented numbers.</p>
+      </header>
+      <button type="button" class="btn btn-ghost" id="eval-btn">Run evaluation</button>
+      <p id="eval-error" class="inline-error" role="alert" hidden></p>
+      <div id="eval-result" hidden>
+        <table class="table" aria-label="Evaluation results">
+          <thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+          <tbody id="eval-body"></tbody>
+        </table>
+        <ul id="eval-notes" class="notes"></ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>Local-first: packages live in <code id="footer-location">~/.contextbridge</code>. The only time a transcript leaves this machine is when you pick a vendor extraction engine.</p>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/static/app.js" defer></script>
 </body>
-
 </html>

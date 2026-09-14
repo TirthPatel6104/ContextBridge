@@ -1,456 +1,526 @@
 """
-ContextBridge Web Dashboard — browser-based UI for context management.
+ContextBridge Web Dashboard — local-first browser UI for context management.
 
-A sleek single-page web app for extracting, managing, and transferring
-conversational context between LLMs. Supports drag-and-drop file upload
-for ChatGPT exports, PDFs, documents, and chat transcripts.
+The app is built by :func:`create_app` so tests can inject a temporary store.
+All endpoints are JSON under ``/api/``; the single page at ``/`` drives the
+import → review → retrieve → export workflow.
 
-Run: python -m contextbridge.web.app
+Run: ``python -m contextbridge.web.app`` (binds to 127.0.0.1:5000).
 """
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import os
-import traceback
 from pathlib import Path
+from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
-from contextbridge.adapters import get_adapter
+from contextbridge import __version__
+from contextbridge.config import Settings
 from contextbridge.core.file_parser import parse_file, parse_multiple_files
-from contextbridge.core.memory import MemoryExtractor
-from contextbridge.core.packager import ContextPackager
-from contextbridge.core.prompt_builder import PromptBuilder
-from contextbridge.storage.json_store import JSONStore
-
-app = Flask(
-    __name__,
-    template_folder=os.path.join(os.path.dirname(__file__), "templates"),
-    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+from contextbridge.core.redaction import describe_kinds
+from contextbridge.models import MemoryCategory, RetrievalOptions
+from contextbridge.service import ContextBridgeService
+from contextbridge.storage import get_store
+from contextbridge.storage.base import PackageNotFoundError, StorageBackend
+from contextbridge.validation import (
+    ValidationError,
+    safe_filename,
+    validate_package_name,
+    validate_upload_filename,
 )
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB max upload
-CORS(app)  # Allow extension & cross-origin requests
 
-packager = ContextPackager()
-prompt_builder = PromptBuilder()
+logger = logging.getLogger(__name__)
 
-# Directory to store attached files per package
-# Directory to store attached files per package
-FILES_DIR = Path.home() / ".contextbridge" / "attached_files"
-FILES_DIR.mkdir(parents=True, exist_ok=True)
-
-# Watch directory for auto-upload
-WATCH_DIR = Path.home() / ".contextbridge" / "watch"
-WATCH_DIR.mkdir(parents=True, exist_ok=True)
+_HERE = Path(__file__).parent
 
 
-def _get_store() -> JSONStore:
-    return JSONStore()
+def _truthy(value: Any, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _get_files_dir(package_name: str) -> Path:
-    d = FILES_DIR / package_name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _run_async(coro):
-    return asyncio.run(coro)
-
-
-# ---------------------------------------------------------------------------
-# Pages
-# ---------------------------------------------------------------------------
-
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-# ---------------------------------------------------------------------------
-# API Endpoints
-# ---------------------------------------------------------------------------
-
-
-@app.route("/api/local/models", methods=["GET"])
-def api_list_local_models():
-    """List available local models from Ollama."""
+def _parse_options(payload: dict[str, Any]) -> RetrievalOptions:
+    """Build RetrievalOptions from a JSON body, with friendly errors."""
+    kwargs: dict[str, Any] = {}
+    if payload.get("top_k") not in (None, ""):
+        kwargs["top_k"] = int(payload["top_k"])
+    if payload.get("token_budget") not in (None, ""):
+        kwargs["token_budget"] = int(payload["token_budget"])
+    if payload.get("min_score") not in (None, ""):
+        kwargs["min_score"] = float(payload["min_score"])
+    cats = payload.get("categories")
+    if cats:
+        if isinstance(cats, str):
+            cats = [c for c in cats.split(",") if c.strip()]
+        try:
+            kwargs["categories"] = [MemoryCategory(c.strip()) for c in cats]
+        except ValueError as exc:
+            raise ValidationError(f"Unknown category: {exc}") from exc
     try:
-        from contextbridge.adapters.local_adapter import LocalAdapter
-
-        # We need an async loop for the async list_models method
-        models = _run_async(LocalAdapter.list_models())
-        return jsonify({"models": models})
-    except Exception as e:
-        # Return empty list if Ollama is down, rather than 500
-        return jsonify({"models": [], "error": str(e)})
+        return RetrievalOptions(**kwargs)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"Invalid retrieval options: {exc}") from exc
 
 
-@app.route("/api/extract", methods=["POST"])
-def api_extract():
-    """Extract structured memory from uploaded files.
+def create_app(
+    settings: Settings | None = None,
+    *,
+    store: StorageBackend | None = None,
+    service: ContextBridgeService | None = None,
+) -> Flask:
+    """Application factory."""
+    settings = settings or Settings.from_env()
+    store = store or get_store(settings=settings)
+    svc = service or ContextBridgeService(store, settings=settings)
 
-    Accepts multipart/form-data with:
-      - files[]: one or more files (ZIP, PDF, TXT, JSON, HTML, MD)
-      - model: extraction engine - 'local' (default, no API key) or 'openai'/'claude'
-      - package_name: name for the context package
-    """
-    try:
-        model = request.form.get("model", "local")
-        package_name = request.form.get("package_name", "").strip()
+    app = Flask(
+        __name__,
+        template_folder=str(_HERE / "templates"),
+        static_folder=str(_HERE / "static"),
+    )
+    app.config["MAX_CONTENT_LENGTH"] = settings.max_upload_bytes
+    app.config["JSON_SORT_KEYS"] = False
+    app.extensions["cb_service"] = svc
+    app.extensions["cb_settings"] = settings
 
-        if not package_name:
-            return jsonify({"error": "No package name provided"}), 400
+    # Only the chat sites (for the extension) may call the API cross-origin.
+    CORS(app, resources={r"/api/*": {"origins": list(settings.allowed_origins)}})
 
-        # Collect all uploaded files
-        uploaded_files = request.files.getlist("files[]")
-        if not uploaded_files or all(f.filename == "" for f in uploaded_files):
-            return jsonify({"error": "No files uploaded"}), 400
+    files_dir = settings.storage_dir / "attached_files"
+    watch_dir = settings.storage_dir / "watch"
 
-        # Parse all files into combined text
-        file_data = []
-        file_names = []
-        for f in uploaded_files:
-            if f.filename:
-                file_bytes = f.read()
-                file_data.append((file_bytes, f.filename))
-                file_names.append(f.filename)
+    def _package_files_dir(name: str, *, create: bool = False) -> Path:
+        d = files_dir / validate_package_name(name)
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
+        return d
 
-        if not file_data:
-            return jsonify({"error": "No valid files uploaded"}), 400
-
-        combined_text = parse_multiple_files(file_data)
-
-        if not combined_text.strip():
-            return jsonify({"error": "Could not extract any text from the uploaded files"}), 400
-
-        # Extract structured memory
-        if model == "local":
-            # Local extraction — no API key needed
-            from contextbridge.core.local_extractor import LocalExtractor
-
-            local_ext = LocalExtractor()
-            memory = local_ext.extract(combined_text)
-        else:
-            # API-based extraction (needs API key)
-            adapter = get_adapter(model)
-            extractor = MemoryExtractor()
-            memory = _run_async(extractor.extract(combined_text, adapter, source_model=model))
-
-        # Package and save
-        store = _get_store()
-        if store.exists(package_name):
-            existing = store.load(package_name)
-            pkg = packager.update(existing, memory, source_model=model)
-        else:
-            pkg = packager.create(package_name, memory, source_model=model)
-
-        store.save(pkg)
-
-        # Serialize memory for response
-        from contextbridge.models import MemoryCategory
-
-        memory_data = {}
-        for cat in MemoryCategory:
-            items = memory.get_category(cat)
-            memory_data[cat.value] = [
-                {"content": item.content, "confidence": item.confidence, "source": item.source}
-                for item in items
-            ]
-
-        return jsonify(
-            {
-                "success": True,
-                "package_name": package_name,
-                "version": pkg.version,
-                "total_items": memory.total_items,
-                "memory": memory_data,
-                "files_processed": file_names,
-                "chars_extracted": len(combined_text),
-            }
-        )
-
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/prompt", methods=["POST"])
-def api_prompt():
-    """Generate a paste-ready prompt for a target model.
-
-    Includes structured memory context AND full content of any attached files.
-    """
-    try:
-        data = request.get_json()
-        package_name = data.get("package_name", "").strip()
-        target_model = data.get("target_model", "claude")
-
-        if not package_name:
-            return jsonify({"error": "No package name provided"}), 400
-
-        store = _get_store()
-        if not store.exists(package_name):
-            return jsonify({"error": f"Package '{package_name}' not found"}), 404
-
-        pkg = store.load(package_name)
-        context_block = prompt_builder.build(pkg, target_model)
-
-        target_name = "Claude" if "claude" in target_model.lower() else "ChatGPT"
-
-        # Build the prompt with context
-        parts = [
-            "I'm continuing a conversation from another AI assistant. "
-            "Below is structured context extracted from our previous chats, "
-            "along with the full content of files we were working with. "
-            "Please internalise all of this as established knowledge and "
-            "maintain full continuity.",
-            "",
-            context_block,
+    def _list_dir(directory: Path) -> list[dict[str, Any]]:
+        if not directory.exists():
+            return []
+        return [
+            {"name": fp.name, "size": fp.stat().st_size}
+            for fp in sorted(directory.iterdir())
+            if fp.is_file() and not fp.name.startswith(".")
         ]
 
-        # Embed attached file content
-        files_dir = _get_files_dir(package_name)
-        attached_files = []
-        for fp in sorted(files_dir.iterdir()):
-            if fp.is_file() and not fp.name.startswith("."):
-                attached_files.append(fp)
+    def _read_sections(directory: Path, title: str) -> list[tuple[str, str]]:
+        sections: list[tuple[str, str]] = []
+        for entry in _list_dir(directory):
+            fp = directory / entry["name"]
+            body = fp.read_text(encoding="utf-8", errors="replace")
+            sections.append((f"{title}: {fp.name}", body))
+        return sections
 
-        if attached_files:
-            parts.append("")
-            parts.append("=" * 60)
-            parts.append("ATTACHED FILES (full content from original conversation)")
-            parts.append("=" * 60)
-            for fp in attached_files:
-                content = fp.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"\n--- FILE: {fp.name} ---")
-                parts.append(content)
-                parts.append(f"--- END: {fp.name} ---")
+    # -- Error handling ------------------------------------------------------
 
-        # Embed watched files (auto-detected)
-        watched_files = []
-        if WATCH_DIR.exists():
-            for fp in sorted(WATCH_DIR.iterdir()):
-                if fp.is_file() and not fp.name.startswith("."):
-                    watched_files.append(fp)
+    @app.errorhandler(ValidationError)
+    def _bad_request(exc: ValidationError):
+        return jsonify({"error": str(exc)}), 400
 
-        if watched_files:
-            parts.append("")
-            parts.append("=" * 60)
-            parts.append("AUTO-DETECTED FILES (from watch folder)")
-            parts.append("=" * 60)
-            for fp in watched_files:
-                try:
-                    # Basic text check
-                    content = fp.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"\n--- FILE: {fp.name} ---")
-                    parts.append(content)
-                    parts.append(f"--- END: {fp.name} ---")
-                except Exception:
-                    parts.append(f"\n--- FILE: {fp.name} (Binary/Unreadable) ---")
+    @app.errorhandler(PackageNotFoundError)
+    def _not_found(exc: PackageNotFoundError):
+        return jsonify({"error": str(exc)}), 404
 
-        parts.append("")
-        parts.append("---")
-        parts.append(
-            "Please confirm you've understood this context and the attached files, "
-            "then I'll continue with my questions."
+    @app.errorhandler(RequestEntityTooLarge)
+    def _too_large(exc: RequestEntityTooLarge):
+        limit_mb = settings.max_upload_bytes // (1024 * 1024)
+        return jsonify({"error": f"Upload too large. The limit is {limit_mb} MB."}), 413
+
+    @app.errorhandler(HTTPException)
+    def _http_error(exc: HTTPException):
+        return jsonify({"error": exc.description or exc.name}), exc.code or 500
+
+    @app.errorhandler(Exception)
+    def _server_error(exc: Exception):
+        # Never echo internals (which may include memory content) to the client.
+        logger.exception("Unhandled error in %s", request.path)
+        return jsonify({"error": "Internal error. Check the server log for details."}), 500
+
+    # -- Pages ---------------------------------------------------------------
+
+    @app.route("/")
+    def index():
+        return render_template("index.html", version=__version__)
+
+    # -- Meta ----------------------------------------------------------------
+
+    @app.route("/api/health", methods=["GET"])
+    def api_health():
+        return jsonify(
+            {
+                "ok": True,
+                "version": __version__,
+                "storage_backend": store.backend_name,
+                "storage_location": store.location(),
+                "redact_by_default": settings.redact_by_default,
+                "redaction_kinds": describe_kinds(),
+                "categories": [c.value for c in MemoryCategory],
+                "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
+            }
         )
 
-        paste_prompt = "\n".join(parts)
+    @app.route("/api/local/models", methods=["GET"])
+    def api_list_local_models():
+        """List available local models from Ollama (empty list if it is not running)."""
+        try:
+            from contextbridge.adapters.local_adapter import LocalAdapter
+            from contextbridge.service import _run
 
+            models = _run(LocalAdapter.list_models())
+            return jsonify({"models": models})
+        except Exception:
+            return jsonify({"models": [], "error": "Ollama unreachable"})
+
+    # -- Import / extraction -------------------------------------------------
+
+    @app.route("/api/extract", methods=["POST"])
+    def api_extract():
+        """
+        Extract structured memory from uploaded files into a package.
+
+        Multipart fields: ``files[]``, ``package_name``, ``model`` (engine),
+        ``redact`` (default on), ``mode`` (append|replace).
+        """
+        package_name = validate_package_name(request.form.get("package_name"))
+        engine = request.form.get("model") or "local"
+        redact = _truthy(request.form.get("redact"), settings.redact_by_default)
+        mode = (request.form.get("mode") or "append").strip().lower()
+
+        uploads = [f for f in request.files.getlist("files[]") if f and f.filename]
+        if not uploads:
+            raise ValidationError("No files uploaded")
+
+        file_data: list[tuple[bytes, str]] = []
+        for f in uploads:
+            name = validate_upload_filename(f.filename)
+            file_data.append((f.read(), name))
+
+        combined = parse_multiple_files(file_data)
+        if not combined.strip():
+            raise ValidationError("Could not extract any text from the uploaded files")
+
+        origin = ", ".join(n for _, n in file_data)[:200]
+        outcome = svc.import_text(
+            combined,
+            package_name,
+            engine=engine,
+            origin=origin,
+            redact=redact,
+            mode=mode,
+        )
         return jsonify(
             {
                 "success": True,
-                "prompt": paste_prompt,
-                "target_model": target_name,
-                "package_name": package_name,
-                "version": pkg.version,
-                "total_items": pkg.memory.total_items,
-                "attached_files": [f.name for f in attached_files],
-                "watched_files": [f.name for f in watched_files],
+                "package_name": outcome.package.name,
+                "version": outcome.package.version,
+                "created": outcome.created,
+                "engine": outcome.engine,
+                "total_items": outcome.package.memory.total_items,
+                "added_items": outcome.added_items,
+                "extracted_items": outcome.extracted.total_items,
+                "memory": svc.memory_to_dict(outcome.extracted),
+                "redaction": outcome.redaction.summary(),
+                "files_processed": [n for _, n in file_data],
+                "chars_extracted": outcome.chars,
+                "tokens_transcript": outcome.transcript_tokens,
+                "warnings": outcome.warnings,
             }
         )
 
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/files/attach", methods=["POST"])
-def api_attach_files():
-    """Attach files to a package. Parses their content and stores it.
-
-    Accepts multipart/form-data with:
-      - files[]: one or more files
-      - package_name: which package to attach to
-    """
-    try:
-        package_name = request.form.get("package_name", "").strip()
-        if not package_name:
-            return jsonify({"error": "No package name provided"}), 400
-
-        uploaded = request.files.getlist("files[]")
-        if not uploaded or all(f.filename == "" for f in uploaded):
-            return jsonify({"error": "No files uploaded"}), 400
-
-        files_dir = _get_files_dir(package_name)
-        saved = []
-
-        for f in uploaded:
-            if not f.filename:
-                continue
-
-            raw_bytes = f.read()
-            filename = f.filename
-
-            # Parse file to text
-            text = parse_file(raw_bytes, filename)
-
-            # Save the extracted text
-            safe_name = Path(filename).stem + ".txt"
-            dest = files_dir / safe_name
-            dest.write_text(text, encoding="utf-8")
-            saved.append({"original": filename, "stored_as": safe_name, "chars": len(text)})
-
+    @app.route("/api/redaction/scan", methods=["POST"])
+    def api_redaction_scan():
+        """Preview what the redactor would mask in a piece of text."""
+        payload = request.get_json(silent=True) or {}
+        text = payload.get("text") or ""
+        if not isinstance(text, str) or not text.strip():
+            raise ValidationError("No text provided")
+        report = svc.scan(text)
         return jsonify(
             {
-                "success": True,
-                "package_name": package_name,
-                "files_attached": saved,
+                "summary": report.summary(),
+                "findings": [f.model_dump() for f in report.findings[:200]],
             }
         )
 
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    # -- Packages ------------------------------------------------------------
 
+    @app.route("/api/packages", methods=["GET"])
+    def api_list_packages():
+        return jsonify({"packages": svc.list_packages()})
 
-@app.route("/api/files/<name>", methods=["GET"])
-def api_list_files(name: str):
-    """List files attached to a package."""
-    try:
-        files_dir = _get_files_dir(name)
-        files = []
-        for fp in sorted(files_dir.iterdir()):
-            if fp.is_file() and not fp.name.startswith("."):
-                files.append(
-                    {
-                        "name": fp.name,
-                        "size": fp.stat().st_size,
-                    }
-                )
-        return jsonify({"package_name": name, "files": files})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    @app.route("/api/packages/<name>", methods=["GET"])
+    def api_get_package(name: str):
+        pkg = svc.get_package(name)
+        return jsonify(svc.package_to_dict(pkg))
 
-
-@app.route("/api/watch/files", methods=["GET"])
-def api_list_watch_files():
-    """List files currently in the watch folder."""
-    try:
-        files = []
-        if WATCH_DIR.exists():
-            for fp in sorted(WATCH_DIR.iterdir()):
-                if fp.is_file() and not fp.name.startswith("."):
-                    files.append(
-                        {
-                            "name": fp.name,
-                            "size": fp.stat().st_size,
-                        }
-                    )
-        return jsonify({"files": files, "watch_dir": str(WATCH_DIR)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/packages", methods=["GET"])
-def api_list_packages():
-    """List all stored context packages."""
-    try:
-        store = _get_store()
-        packages = store.list_packages()
-
-        result = []
-        for name in packages:
-            pkg = store.load(name)
-            result.append(
-                {
-                    "name": name,
-                    "version": pkg.version,
-                    "source_model": pkg.source_model or "unknown",
-                    "total_items": pkg.memory.total_items,
-                    "updated_at": pkg.updated_at.strftime("%Y-%m-%d %H:%M"),
-                }
-            )
-
-        return jsonify({"packages": result})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/packages/<name>", methods=["GET"])
-def api_get_package(name: str):
-    """Get details of a specific package."""
-    try:
-        store = _get_store()
-        if not store.exists(name):
-            return jsonify({"error": f"Package '{name}' not found"}), 404
-
-        pkg = store.load(name)
-
-        from contextbridge.models import MemoryCategory
-
-        memory_data = {}
-        for cat in MemoryCategory:
-            items = pkg.memory.get_category(cat)
-            memory_data[cat.value] = [
-                {"content": item.content, "confidence": item.confidence, "source": item.source}
-                for item in items
-            ]
-
-        return jsonify(
-            {
-                "name": pkg.name,
-                "version": pkg.version,
-                "source_model": pkg.source_model,
-                "total_items": pkg.memory.total_items,
-                "created_at": pkg.created_at.strftime("%Y-%m-%d %H:%M"),
-                "updated_at": pkg.updated_at.strftime("%Y-%m-%d %H:%M"),
-                "memory": memory_data,
-            }
-        )
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/packages/<name>", methods=["DELETE"])
-def api_delete_package(name: str):
-    """Delete a context package."""
-    try:
-        store = _get_store()
-        if not store.exists(name):
-            return jsonify({"error": f"Package '{name}' not found"}), 404
-
-        store.delete(name)
+    @app.route("/api/packages/<name>", methods=["DELETE"])
+    def api_delete_package(name: str):
+        svc.delete_package(name)
         return jsonify({"success": True, "deleted": name})
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    @app.route("/api/packages/<name>/history", methods=["GET"])
+    def api_history(name: str):
+        return jsonify({"package_name": name, "history": svc.history(name)})
+
+    @app.route("/api/packages/<name>/rollback", methods=["POST"])
+    def api_rollback(name: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            version = int(payload.get("version"))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("A target version is required") from exc
+        try:
+            pkg = svc.rollback(name, version)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        return jsonify({"success": True, "package_name": pkg.name, "version": pkg.version})
+
+    @app.route("/api/packages/<name>/items/remove", methods=["POST"])
+    def api_remove_items(name: str):
+        payload = request.get_json(silent=True) or {}
+        ids = payload.get("ids") or []
+        if not isinstance(ids, list):
+            raise ValidationError("'ids' must be a list")
+        pkg = svc.remove_items(name, ids, note=str(payload.get("note") or ""))
+        return jsonify(
+            {
+                "success": True,
+                "package_name": pkg.name,
+                "version": pkg.version,
+                "total_items": pkg.memory.total_items,
+                "memory": svc.memory_to_dict(pkg.memory),
+            }
+        )
+
+    # -- Retrieval & prompt --------------------------------------------------
+
+    @app.route("/api/retrieve", methods=["POST"])
+    def api_retrieve():
+        payload = request.get_json(silent=True) or {}
+        name = validate_package_name(payload.get("package_name"))
+        query = str(payload.get("query") or "")
+        options = _parse_options(payload)
+        result = svc.retrieve(name, query, options)
+        return jsonify(
+            {
+                "package_name": name,
+                "query": query,
+                "summary": result.summary(),
+                "options": result.options.model_dump(),
+                "selected": [
+                    {
+                        "rank": s.rank,
+                        "score": s.score,
+                        "lexical_score": s.lexical_score,
+                        "embedding_score": s.embedding_score,
+                        "matched_terms": s.matched_terms,
+                        "reason": s.reason,
+                        "tokens": s.tokens,
+                        "item": {
+                            "id": s.item.id,
+                            "category": s.item.category.value,
+                            "content": s.item.content,
+                            "confidence": s.item.confidence,
+                            "source": s.item.source,
+                            "origin": s.item.origin,
+                            "redactions": [r.model_dump() for r in s.item.redactions],
+                        },
+                    }
+                    for s in result.selected
+                ],
+            }
+        )
+
+    @app.route("/api/prompt", methods=["POST"])
+    def api_prompt():
+        """
+        Generate a paste-ready prompt.
+
+        JSON: ``package_name``, ``target_model``, optional ``query`` plus
+        retrieval options, ``include_files`` (attached files, default off),
+        ``include_watch`` (watch folder, default off).
+        """
+        payload = request.get_json(silent=True) or {}
+        name = validate_package_name(payload.get("package_name"))
+        target = str(payload.get("target_model") or "claude")
+        query = payload.get("query")
+        options = _parse_options(payload) if query else None
+
+        extras: list[tuple[str, str]] = []
+        attached: list[str] = []
+        watched: list[str] = []
+        if _truthy(payload.get("include_files")):
+            d = _package_files_dir(name)
+            extras.extend(_read_sections(d, "ATTACHED FILE"))
+            attached = [e["name"] for e in _list_dir(d)]
+        if _truthy(payload.get("include_watch")):
+            extras.extend(_read_sections(watch_dir, "WATCH FOLDER FILE"))
+            watched = [e["name"] for e in _list_dir(watch_dir)]
+
+        built = svc.build_prompt(name, target, query=query, options=options, extras=extras)
+        retrieval = built.pop("retrieval")
+        built["retrieval"] = retrieval.summary() if retrieval else None
+        built["attached_files"] = attached
+        built["watched_files"] = watched
+        built["success"] = True
+        return jsonify(built)
+
+    # -- Portability ---------------------------------------------------------
+
+    @app.route("/api/packages/<name>/export", methods=["GET"])
+    def api_export_package(name: str):
+        body = svc.export_package_json(name)
+        filename = f"{validate_package_name(name)}.contextbridge.json"
+        return Response(
+            body,
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.route("/api/packages/import", methods=["POST"])
+    def api_import_package():
+        rename = None
+        overwrite = False
+        if request.files.get("file"):
+            upload = request.files["file"]
+            safe_filename(upload.filename)
+            data: bytes | dict = upload.read()
+            rename = request.form.get("rename") or None
+            overwrite = _truthy(request.form.get("overwrite"))
+        else:
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                raise ValidationError("Send a package file as 'file' or a JSON body")
+            data = payload.get("package_file") or payload
+            rename = payload.get("rename") or None
+            overwrite = _truthy(payload.get("overwrite"))
+        pkg = svc.import_package_data(data, rename=rename, overwrite=overwrite)
+        return jsonify(
+            {
+                "success": True,
+                "package_name": pkg.name,
+                "version": pkg.version,
+                "total_items": pkg.memory.total_items,
+            }
+        )
+
+    @app.route("/api/packages/merge", methods=["POST"])
+    def api_merge_packages():
+        payload = request.get_json(silent=True) or {}
+        names = payload.get("names") or []
+        if not isinstance(names, list):
+            raise ValidationError("'names' must be a list")
+        new_name = payload.get("new_name") or ""
+        dry_run = _truthy(payload.get("dry_run"))
+        merged, result = svc.merge_packages(
+            [str(n) for n in names],
+            new_name,
+            dry_run=dry_run,
+            overwrite=_truthy(payload.get("overwrite")),
+        )
+        item = svc.memory_to_dict
+        return jsonify(
+            {
+                "success": True,
+                "dry_run": dry_run,
+                "package_name": merged.name,
+                "summary": result.summary(),
+                "memory": item(result.memory),
+                "duplicates": [
+                    {
+                        "kept": _item_dict(g.kept),
+                        "duplicates": [_item_dict(d) for d in g.duplicates],
+                        "similarity": g.similarity,
+                        "origins": g.origins,
+                    }
+                    for g in result.duplicates
+                ],
+                "conflicts": [
+                    {
+                        "category": c.category.value,
+                        "a": _item_dict(c.a),
+                        "b": _item_dict(c.b),
+                        "similarity": c.similarity,
+                        "shared_terms": c.shared_terms,
+                        "reason": c.reason,
+                    }
+                    for c in result.conflicts
+                ],
+            }
+        )
+
+    # -- Evaluation ----------------------------------------------------------
+
+    @app.route("/api/eval", methods=["GET"])
+    def api_eval():
+        from contextbridge.evaluation import run_evaluation
+
+        report = run_evaluation()
+        return jsonify(report.model_dump(mode="json"))
+
+    # -- Attached files (explicit opt-in extras for prompts) -----------------
+
+    @app.route("/api/files/attach", methods=["POST"])
+    def api_attach_files():
+        name = validate_package_name(request.form.get("package_name"))
+        if not store.exists(name):
+            raise PackageNotFoundError(f"Package '{name}' not found")
+        uploads = [f for f in request.files.getlist("files[]") if f and f.filename]
+        if not uploads:
+            raise ValidationError("No files uploaded")
+        target_dir = _package_files_dir(name, create=True)
+        saved = []
+        for f in uploads:
+            original = safe_filename(f.filename)
+            text = parse_file(f.read(), original)
+            stored_as = Path(original).stem + ".txt"
+            (target_dir / stored_as).write_text(text, encoding="utf-8")
+            saved.append({"original": original, "stored_as": stored_as, "chars": len(text)})
+        return jsonify({"success": True, "package_name": name, "files_attached": saved})
+
+    @app.route("/api/files/<name>", methods=["GET"])
+    def api_list_files(name: str):
+        return jsonify({"package_name": name, "files": _list_dir(_package_files_dir(name))})
+
+    @app.route("/api/watch/files", methods=["GET"])
+    def api_list_watch_files():
+        return jsonify({"files": _list_dir(watch_dir), "watch_dir": str(watch_dir)})
+
+    return app
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+def _item_dict(item) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "category": item.category.value,
+        "content": item.content,
+        "confidence": item.confidence,
+        "source": item.source,
+        "origin": item.origin,
+    }
 
-if __name__ == "__main__":
+
+def main() -> None:  # pragma: no cover - manual entry point
     from dotenv import load_dotenv
 
     load_dotenv()
+    logging.basicConfig(level=os.getenv("CB_LOG_LEVEL", "INFO"))
+    settings = Settings.from_env()
+    application = create_app(settings)
     print("\n  ContextBridge Dashboard")
-    print("  http://localhost:5000\n")
-    app.run(debug=True, port=5000)
+    print(f"  http://{settings.host}:{settings.port}")
+    print(f"  Storage: {application.extensions['cb_service'].store.location()}\n")
+    application.run(host=settings.host, port=settings.port, debug=_truthy(os.getenv("CB_DEBUG")))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
