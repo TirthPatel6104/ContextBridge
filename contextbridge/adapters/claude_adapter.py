@@ -16,9 +16,11 @@ class ClaudeAdapter(LLMInterface):
     Uses ``claude-3-haiku-20240307`` for generation/summarisation.
 
     Embeddings: Claude does not natively support embeddings, so this
-    adapter uses a lightweight local fallback via numpy-based hashing.
-    For production, swap in a dedicated embedding service.
+    adapter returns a deterministic hash-based pseudo-embedding.  It is
+    flagged as non-semantic, so the retriever relies on lexical scoring.
     """
+
+    semantic_embeddings = False
 
     def __init__(
         self,

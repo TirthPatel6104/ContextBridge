@@ -79,4 +79,4 @@ class TestContextPackager:
         summaries = packager.get_version_summary(pkg)
         assert len(summaries) == 2
         assert summaries[0]["version"] == 1
-        assert summaries[1]["version"] == 1
+        assert summaries[1]["version"] == 2
