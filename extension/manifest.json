@@ -1,9 +1,11 @@
 {
   "manifest_version": 3,
   "name": "ContextBridge",
-  "version": "0.1.0",
-  "description": "One-click context transfer between ChatGPT and Claude. Extracts your conversation and creates a paste-ready prompt for the other AI.",
-  "permissions": ["activeTab"],
+  "version": "0.2.0",
+  "description": "Carry your working context between ChatGPT and Claude. Extracts the open conversation into your local ContextBridge memory (secrets redacted) and gives you a paste-ready prompt for the other AI.",
+  "permissions": [
+    "activeTab"
+  ],
   "icons": {
     "48": "icon48.png",
     "128": "icon128.png"
@@ -15,12 +17,17 @@
         "https://chat.openai.com/*",
         "https://claude.ai/*"
       ],
-      "js": ["content.js"],
-      "css": ["widget.css"],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "widget.css"
+      ],
       "run_at": "document_idle"
     }
   ],
   "host_permissions": [
-    "http://localhost:5000/*"
+    "http://localhost:5000/*",
+    "http://127.0.0.1:5000/*"
   ]
 }

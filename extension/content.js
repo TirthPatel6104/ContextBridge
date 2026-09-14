@@ -162,7 +162,8 @@ async function generatePrompt(packageName, targetModel) {
     const res = await fetch(`${CB_SERVER}/api/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ package_name: packageName, target_model: targetModel }),
+        // Attached files are included only because the user explicitly attached them here.
+        body: JSON.stringify({ package_name: packageName, target_model: targetModel, include_files: true }),
     });
 
     if (!res.ok) {
@@ -171,6 +172,13 @@ async function generatePrompt(packageName, targetModel) {
     }
 
     return await res.json();
+}
+
+// Package names must match the server's rules: letters, digits, '_', '-', '.'
+// starting with a letter or digit, at most 64 characters.
+function toPackageName(raw) {
+    const cleaned = (raw || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').substring(0, 64);
+    return cleaned && /^[a-z0-9]/.test(cleaned) ? cleaned : 'chat_' + Date.now().toString(36);
 }
 
 async function getAttachedFiles(packageName) {
@@ -258,8 +266,7 @@ function createWidget() {
 
         const nameInput = document.getElementById('cb-package-name');
         if (!nameInput.value) {
-            const title = getConversationTitle();
-            nameInput.value = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').substring(0, 30);
+            nameInput.value = toPackageName(getConversationTitle());
         }
 
         // Check for watched files
@@ -318,6 +325,10 @@ function createWidget() {
     document.getElementById('cb-extract-btn').addEventListener('click', async () => {
         const packageName = document.getElementById('cb-package-name').value.trim();
         if (!packageName) { showStatus('Enter a package name', 'error'); return; }
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.\-]{0,63}$/.test(packageName)) {
+            showStatus('Package name: letters, digits, _ - . only (max 64)', 'error');
+            return;
+        }
 
         const chatText = scrapeChat();
         if (!chatText || chatText.length < 20) {
@@ -331,7 +342,14 @@ function createWidget() {
         try {
             // Step 1: Extract chat
             const result = await sendToContextBridge(chatText, packageName);
-            let statusMsg = `\u2705 Extracted ${result.total_items} items`;
+            let statusMsg = `\u2705 Extracted ${result.extracted_items ?? result.total_items} items`;
+            if (result.redaction && result.redaction.total > 0) {
+                const kinds = Object.values(result.redaction.labels || {}).join(', ');
+                statusMsg += ` \u00b7 \u{1F512} ${result.redaction.total} value(s) redacted (${kinds})`;
+            }
+            if (result.warnings && result.warnings.length) {
+                statusMsg += ` \u00b7 \u26a0 ${result.warnings[0]}`;
+            }
 
             // Step 2: Upload attached files (if any)
             if (attachedFiles.length > 0) {
