@@ -1,13 +1,15 @@
-"""JSON file-based storage backend."""
+"""JSON file-based storage backend (legacy / portable format)."""
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
 from contextbridge.models import ContextPackage
-from contextbridge.storage.base import StorageBackend
+from contextbridge.storage.base import PackageNotFoundError, StorageBackend
+from contextbridge.validation import is_valid_package_name, validate_package_name
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +26,20 @@ class JSONStore(StorageBackend):
         ├── my_project/
         │   ├── context_v1.json
         │   ├── context_v2.json
-        │   └── latest.json       ← symlink / copy of highest version
+        │   └── latest.json       ← copy of the current version
         └── another_project/
             └── context_v1.json
 
     Each version is stored as a separate file so history is preserved
     on disk and individual versions can be inspected without loading
-    the full package.
+    the full package.  This backend is kept for backward compatibility and
+    because the files are easy to inspect by hand; :class:`SQLiteStore` is
+    the recommended durable backend.
     """
 
-    def __init__(self, base_dir: str | Path | None = None) -> None:
-        import os
+    backend_name = "json"
 
+    def __init__(self, base_dir: str | Path | None = None) -> None:
         env_dir = os.getenv("CB_STORAGE_DIR")
         if base_dir:
             self._base = Path(base_dir)
@@ -49,60 +53,56 @@ class JSONStore(StorageBackend):
     def base_dir(self) -> Path:
         return self._base
 
+    def location(self) -> str:
+        return str(self._base)
+
+    def _pkg_dir(self, name: str) -> Path:
+        return self._base / validate_package_name(name)
+
     # -- StorageBackend interface -------------------------------------------
 
     def save(self, package: ContextPackage) -> None:
-        pkg_dir = self._base / package.name
+        pkg_dir = self._pkg_dir(package.name)
         pkg_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save versioned file
-        version_file = pkg_dir / f"context_v{package.version}.json"
         data = package.model_dump_json(indent=2)
-        version_file.write_text(data, encoding="utf-8")
+        version_file = pkg_dir / f"context_v{package.version}.json"
+        _atomic_write(version_file, data)
+        _atomic_write(pkg_dir / "latest.json", data)
 
-        # Save a "latest" copy for quick access
-        latest_file = pkg_dir / "latest.json"
-        latest_file.write_text(data, encoding="utf-8")
-
-        logger.info(
-            "Saved package '%s' v%d → %s",
-            package.name,
-            package.version,
-            version_file,
-        )
+        logger.info("Saved package '%s' v%d", package.name, package.version)
 
     def load(self, name: str, *, version: int | None = None) -> ContextPackage:
-        pkg_dir = self._base / name
+        pkg_dir = self._pkg_dir(name)
         if not pkg_dir.exists():
-            raise FileNotFoundError(f"No package named '{name}' found")
+            raise PackageNotFoundError(f"No package named '{name}' found")
 
         if version is not None:
             target = pkg_dir / f"context_v{version}.json"
             if not target.exists():
-                raise FileNotFoundError(f"Version {version} of package '{name}' not found")
+                raise PackageNotFoundError(f"Version {version} of package '{name}' not found")
         else:
             target = pkg_dir / "latest.json"
             if not target.exists():
-                # Fallback: find highest version
-                versions = sorted(pkg_dir.glob("context_v*.json"))
+                versions = self.list_versions(name)
                 if not versions:
-                    raise FileNotFoundError(f"No versions found for '{name}'")
-                target = versions[-1]
+                    raise PackageNotFoundError(f"No versions found for '{name}'")
+                target = pkg_dir / f"context_v{versions[-1]}.json"
 
         raw = target.read_text(encoding="utf-8")
-        package = ContextPackage.model_validate_json(raw)
-        logger.info("Loaded package '%s' v%d", package.name, package.version)
-        return package
+        return ContextPackage.model_validate_json(raw)
 
     def list_packages(self) -> list[str]:
         if not self._base.exists():
             return []
         return sorted(
-            d.name for d in self._base.iterdir() if d.is_dir() and (d / "latest.json").exists()
+            d.name
+            for d in self._base.iterdir()
+            if d.is_dir() and is_valid_package_name(d.name) and (d / "latest.json").exists()
         )
 
     def delete(self, name: str) -> None:
-        pkg_dir = self._base / name
+        pkg_dir = self._pkg_dir(name)
         if pkg_dir.exists():
             shutil.rmtree(pkg_dir)
             logger.info("Deleted package '%s'", name)
@@ -110,20 +110,28 @@ class JSONStore(StorageBackend):
             logger.warning("Package '%s' not found for deletion", name)
 
     def exists(self, name: str) -> bool:
-        return (self._base / name / "latest.json").exists()
-
-    # -- Convenience --------------------------------------------------------
+        if not is_valid_package_name(name):
+            return False
+        return (self._base / name.strip() / "latest.json").exists()
 
     def list_versions(self, name: str) -> list[int]:
         """List all stored version numbers for a package."""
-        pkg_dir = self._base / name
+        if not is_valid_package_name(name):
+            return []
+        pkg_dir = self._base / name.strip()
         if not pkg_dir.exists():
             return []
         versions = []
         for f in pkg_dir.glob("context_v*.json"):
             try:
-                v = int(f.stem.split("_v")[1])
-                versions.append(v)
+                versions.append(int(f.stem.split("_v")[1]))
             except (IndexError, ValueError):
                 continue
         return sorted(versions)
+
+
+def _atomic_write(path: Path, data: str) -> None:
+    """Write via a temp file + rename so a crash never leaves a half-written package."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
