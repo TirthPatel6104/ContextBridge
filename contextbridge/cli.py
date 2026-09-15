@@ -12,6 +12,14 @@ Package commands
     cb export-package / import-package     Portable JSON files
     cb merge                               Combine packages with review report
 
+Sharing boundaries & lifecycle
+    cb share         Set who may see an item (any / local_only / never)
+    cb done / reopen Mark open tasks finished, or active again
+    cb supersede     Record that one item replaces another
+    cb conflicts     Review statements that may contradict stored memory
+    cb audit         Egress ledger: which items went to which model, when
+    cb health        Stale items, open tasks, exposure, unresolved conflicts
+
 Privacy & quality
     cb scan          Show what the redactor would mask in a file
     cb eval          Run the offline evaluation suite
@@ -40,9 +48,11 @@ from contextbridge.core.file_parser import parse_multiple_files
 from contextbridge.core.redaction import DETECTOR_LABELS
 from contextbridge.models import (
     CATEGORY_LABELS,
+    ItemStatus,
     MemoryCategory,
     RetrievalOptions,
     RetrievalResult,
+    SharingPolicy,
     StructuredMemory,
 )
 from contextbridge.service import ContextBridgeService
@@ -60,6 +70,7 @@ ENGINE_HELP = (
 )
 TARGET_CHOICES = click.Choice(["openai", "claude", "local", "ollama"], case_sensitive=False)
 CATEGORY_CHOICES = click.Choice([c.value for c in MemoryCategory], case_sensitive=False)
+SHARING_CHOICES = click.Choice([p.value for p in SharingPolicy], case_sensitive=False)
 
 _CATEGORY_ICONS = {
     MemoryCategory.IDENTITY: "👤",
@@ -229,17 +240,22 @@ def import_cmd(ctx: Context, files: tuple[Path, ...], package: str, engine: str,
     _display_redaction(outcome.redaction)
     for warning in outcome.warnings:
         console.print(f"[yellow]⚠[/] {warning}")
+    for note in outcome.notes:
+        console.print(f"[cyan]ℹ[/] {note}")
 
     verb = "Created" if outcome.created else "Updated"
+    seen = f", {outcome.re_seen_items} seen again" if outcome.re_seen_items else ""
     console.print(
         f"\n[green]✓[/] {verb} package [bold]{outcome.package.name}[/] "
         f"→ v{outcome.package.version} "
-        f"({outcome.added_items} new, {outcome.package.memory.total_items} total items)"
+        f"({outcome.added_items} new{seen}, {outcome.package.memory.total_items} total items)"
     )
     console.print(
         f"[dim]Transcript ≈ {outcome.transcript_tokens:,} tokens · "
         f"stored in {ctx.service.store.location()}[/]"
     )
+    if outcome.conflicts:
+        _display_pending(outcome.package, outcome.conflicts)
 
 
 @main.command()
@@ -379,10 +395,17 @@ def retrieve(ctx: Context, name, query, top_k, categories, budget, min_score, as
 @click.option("--budget", "-b", type=click.IntRange(1), default=None, help="Token budget.")
 @click.option("--copy", is_flag=True, default=False, help="Copy the prompt to the clipboard.")
 @click.option("--raw", is_flag=True, default=False, help="Print only the prompt (for piping).")
+@click.option(
+    "--dry-run", is_flag=True, default=False, help="Preview without recording in the egress ledger."
+)
 @pass_ctx
 @_handle_errors
-def prompt(ctx: Context, name, model, query, top_k, categories, budget, copy, raw):
+def prompt(ctx: Context, name, model, query, top_k, categories, budget, copy, raw, dry_run):
     """Generate a paste-ready context prompt for a web UI or local model.
+
+    Items marked local_only are withheld from ChatGPT / Claude, items marked
+    never are withheld from every target, and superseded / done items are
+    never rendered.  Each build is recorded in the egress ledger (cb audit).
 
     \b
     Examples:
@@ -390,7 +413,9 @@ def prompt(ctx: Context, name, model, query, top_k, categories, budget, copy, ra
       cb prompt project --model openai --query "database schema" --top-k 4
     """
     options = _options_from_flags(top_k, categories, budget, 0.0) if query else None
-    built = ctx.service.build_prompt(name, model, query=query, options=options)
+    built = ctx.service.build_prompt(
+        name, model, query=query, options=options, surface="cli", record=not dry_run
+    )
     text = built["prompt"]
 
     if raw:
@@ -400,7 +425,7 @@ def prompt(ctx: Context, name, model, query, top_k, categories, budget, copy, ra
         meta = (
             f"[dim]Package: {name} v{built['version']} · "
             f"{built['included_items']} of {built['total_items']} items · "
-            f"≈ {built['tokens_prompt']:,} tokens"
+            f"≈ {built['tokens_prompt']:,} tokens · target is {built['target_kind']}"
         )
         if retrieval:
             saved = built["tokens_full_prompt"] - built["tokens_prompt"]
@@ -413,6 +438,14 @@ def prompt(ctx: Context, name, model, query, top_k, categories, budget, copy, ra
             )
         )
         console.print(Panel(text, border_style="dim", padding=(1, 2)))
+        _display_withheld(built["withheld"])
+        if dry_run:
+            console.print("[dim]Dry run: not recorded in the egress ledger.[/]")
+        else:
+            console.print(
+                f"[dim]Recorded in the egress ledger (event #{built['egress_id']}); "
+                f"see [bold]cb audit {name}[/bold].[/]"
+            )
 
     if copy:
         if _copy_to_clipboard(text):
@@ -441,17 +474,16 @@ def query(ctx: Context, question: str, context: str, model: str, smart: bool, to
     adapter_name = "local" if model.lower() in {"local", "ollama"} else model
     adapter = get_adapter(adapter_name)
 
-    if smart and pkg.memory.total_items > 0:
-        result = ctx.service.retrieve_from_memory(
-            pkg.memory, question, RetrievalOptions(top_k=top_k), adapter=adapter
-        )
-        system_prompt = ctx.service.builder.build_from_retrieval(pkg, result, model)
+    system_prompt, info = ctx.service.system_prompt_for_query(
+        context, question, model, adapter=adapter, smart=smart, top_k=top_k
+    )
+    result: RetrievalResult | None = info["retrieval"]
+    if result is not None:
         console.print(
-            f"[dim]Injecting {len(result.selected)} of {pkg.memory.total_items} items "
+            f"[dim]Injecting {len(result.selected)} of {info['total_items']} items "
             f"({result.method} retrieval, ≈ {result.tokens_selected:,} tokens).[/]"
         )
-    else:
-        system_prompt = ctx.service.builder.build(pkg, model)
+    _display_withheld(info["withheld"])
 
     console.print(
         Panel(
@@ -511,18 +543,28 @@ def inspect(ctx: Context, name: str, ids: bool):
     """Inspect the contents of a context package."""
     pkg = ctx.service.get_package(name)
     redacted = sum(1 for i in pkg.memory.all_items if i.was_redacted)
+    status = pkg.memory.status_counts()
+    protected = sum(1 for i in pkg.memory.all_items if i.sharing != SharingPolicy.ANY)
+    pending = ctx.service.pending_conflicts(name)
     console.print(
         Panel(
             f"[bold]{pkg.name}[/] v{pkg.version} (schema v{pkg.schema_version})\n"
             f"Source: [yellow]{pkg.source_model or 'unknown'}[/]\n"
             f"Created: [dim]{pkg.created_at:%Y-%m-%d %H:%M}[/]  "
             f"Updated: [dim]{pkg.updated_at:%Y-%m-%d %H:%M}[/]\n"
-            f"Items: [cyan]{pkg.memory.total_items}[/]  Redacted items: [cyan]{redacted}[/]",
+            f"Items: [cyan]{pkg.memory.total_items}[/] "
+            f"(active {status['active']}, superseded {status['superseded']}, done {status['done']})"
+            f"  Redacted: [cyan]{redacted}[/]  Sharing-restricted: [cyan]{protected}[/]"
+            + (f"  Pending conflicts: [red]{len(pending)}[/]" if pending else ""),
             title="Package",
             border_style="cyan",
         )
     )
     _display_memory(pkg.memory, show_ids=ids)
+    if pending:
+        console.print(
+            f"\n[dim]Run [bold]cb conflicts {name}[/bold] to review pending conflicts.[/]"
+        )
 
 
 @main.command()
@@ -539,6 +581,7 @@ def history(ctx: Context, name: str):
     table.add_column("Note")
     table.add_column("Added", style="green", justify="center")
     table.add_column("Removed", style="red", justify="center")
+    table.add_column("Changed", style="yellow", justify="center")
     for v in ctx.service.packager.get_version_summary(pkg):
         table.add_row(
             f"v{v['version']}",
@@ -547,6 +590,7 @@ def history(ctx: Context, name: str):
             v["note"] or "—",
             str(v["added"]),
             str(v["removed"]),
+            str(v.get("modified", 0)),
         )
     console.print(table)
     console.print(f"\n[dim]Current: v{pkg.version} · {pkg.memory.total_items} items[/]")
@@ -588,6 +632,210 @@ def delete(ctx: Context, name: str):
     """Delete a stored context package."""
     ctx.service.delete_package(name)
     console.print(f"[green]✓[/] Deleted package '{name}'")
+
+
+# ---------------------------------------------------------------------------
+# Sharing boundaries & lifecycle
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.argument("name")
+@click.argument("item_ids", nargs=-1, required=True)
+@click.option(
+    "--policy",
+    "-p",
+    type=SHARING_CHOICES,
+    required=True,
+    help="any: every target · local_only: withheld from ChatGPT/Claude · never: no prompt.",
+)
+@pass_ctx
+@_handle_errors
+def share(ctx: Context, name: str, item_ids: tuple[str, ...], policy: str):
+    """Set who may see items when a prompt is built (see ``cb inspect --ids``)."""
+    pkg, changed = ctx.service.set_sharing(name, item_ids, policy)
+    if changed:
+        console.print(
+            f"[green]✓[/] {changed} item(s) now [bold]{policy}[/] → v{pkg.version}. "
+            f"Withheld items are listed every time a prompt is built."
+        )
+    else:
+        console.print("[dim]Nothing changed: those items already had that policy.[/]")
+
+
+@main.command()
+@click.argument("name")
+@click.argument("item_ids", nargs=-1, required=True)
+@pass_ctx
+@_handle_errors
+def done(ctx: Context, name: str, item_ids: tuple[str, ...]):
+    """Mark items (typically open tasks) as done; they stay in history but leave prompts."""
+    pkg, changed = ctx.service.set_status(name, item_ids, ItemStatus.DONE)
+    console.print(f"[green]✓[/] Marked {changed} item(s) done → v{pkg.version}")
+
+
+@main.command()
+@click.argument("name")
+@click.argument("item_ids", nargs=-1, required=True)
+@pass_ctx
+@_handle_errors
+def reopen(ctx: Context, name: str, item_ids: tuple[str, ...]):
+    """Make done or superseded items active again."""
+    pkg, changed = ctx.service.set_status(name, item_ids, ItemStatus.ACTIVE)
+    console.print(f"[green]✓[/] Reactivated {changed} item(s) → v{pkg.version}")
+
+
+@main.command()
+@click.argument("name")
+@click.argument("old_id")
+@click.argument("new_id")
+@pass_ctx
+@_handle_errors
+def supersede(ctx: Context, name: str, old_id: str, new_id: str):
+    """Record that NEW_ID replaces OLD_ID. The old item is kept, marked superseded."""
+    pkg = ctx.service.supersede(name, old_id, new_id)
+    console.print(f"[green]✓[/] {old_id} is now superseded by {new_id} → v{pkg.version}")
+
+
+@main.command()
+@click.argument("name")
+@click.option(
+    "--resolve",
+    nargs=3,
+    metavar="EXISTING_ID INCOMING_ID ACTION",
+    default=None,
+    help="Settle one conflict: ACTION is keep_new, keep_old, or dismiss.",
+)
+@pass_ctx
+@_handle_errors
+def conflicts(ctx: Context, name: str, resolve):
+    """Review new statements that may contradict what a package already holds."""
+    if resolve:
+        existing_id, incoming_id, action = resolve
+        pkg = ctx.service.resolve_conflict(name, existing_id, incoming_id, action)
+        console.print(f"[green]✓[/] Resolved ({action}) → v{pkg.version}")
+    pending = ctx.service.pending_conflicts(name)
+    if not pending:
+        console.print("[green]✓[/] No pending conflicts.")
+        return
+    _display_pending(ctx.service.get_package(name), pending)
+    console.print(
+        "\n[dim]Resolve with [bold]cb conflicts NAME --resolve EXISTING_ID INCOMING_ID "
+        "keep_new|keep_old|dismiss[/bold].[/]"
+    )
+
+
+@main.command()
+@click.argument("name")
+@click.option("--limit", default=50, show_default=True, type=click.IntRange(1, 1000))
+@click.option("--json", "as_json", is_flag=True, help="Print the full ledger as JSON.")
+@click.option("--clear", is_flag=True, help="Delete the ledger for this package.")
+@pass_ctx
+@_handle_errors
+def audit(ctx: Context, name: str, limit: int, as_json: bool, clear: bool):
+    """Egress ledger: which memory items were rendered for which model, and when."""
+    if clear:
+        removed = ctx.service.clear_audit(name)
+        console.print(f"[green]✓[/] Cleared {removed} ledger entr{'y' if removed == 1 else 'ies'}")
+        return
+    report = ctx.service.audit(name, limit=limit)
+    if as_json:
+        import json
+
+        click.echo(json.dumps(report, indent=2))
+        return
+    s = report["summary"]
+    console.print(
+        Panel(
+            f"Events: [cyan]{s['events']}[/] · Items ever shared: [cyan]{s['items_shared']}[/] · "
+            f"Shared with a cloud model: [{'red' if s['items_shared_with_cloud'] else 'green'}]"
+            f"{s['items_shared_with_cloud']}[/] · "
+            f"Never shared: [green]{s['items_never_shared']}[/]\n"
+            f"Targets: {', '.join(s['targets']) or '—'}",
+            title=f"Egress ledger — {name}",
+            border_style="cyan",
+        )
+    )
+    if not report["events"]:
+        console.print("[dim]No prompts have been built for this package yet.[/]")
+        return
+    table = Table(border_style="cyan")
+    table.add_column("#", justify="right")
+    table.add_column("When", style="dim")
+    table.add_column("Target", style="yellow")
+    table.add_column("Kind")
+    table.add_column("Via")
+    table.add_column("Items", justify="right")
+    table.add_column("Withheld", justify="right")
+    table.add_column("Tokens", justify="right", style="dim")
+    table.add_column("Query", style="dim")
+    for e in report["events"]:
+        table.add_row(
+            str(e["id"]),
+            e["timestamp"][:16].replace("T", " "),
+            e["target_model"],
+            "[red]cloud[/]" if e["target_kind"] == "cloud" else "[green]local[/]",
+            e["surface"],
+            str(e["item_count"]),
+            str(e["withheld_count"]),
+            f"{e['tokens']:,}",
+            (e["query"] or "—")[:40],
+        )
+    console.print(table)
+    cloud = [i for i in report["items"] if i["sent_to_cloud"]]
+    if cloud:
+        console.print(f"\n[bold]Items that have been sent to a cloud model ({len(cloud)}):[/]")
+        for i in cloud[:limit]:
+            targets = ", ".join(f"{t} ×{n}" for t, n in i["targets"].items())
+            gone = "" if i["present"] else " [dim](no longer in package)[/]"
+            console.print(f"  • {i['content']}{gone}  [dim]({targets}; id {i['id']})[/]")
+
+
+@main.command()
+@click.argument("name")
+@click.option("--stale-days", default=30, show_default=True, type=click.IntRange(0, 3650))
+@click.option("--json", "as_json", is_flag=True, help="Print the full report as JSON.")
+@pass_ctx
+@_handle_errors
+def health(ctx: Context, name: str, stale_days: int, as_json: bool):
+    """Memory health: stale items, open tasks, corroboration, exposure, conflicts."""
+    report = ctx.service.health(name, stale_days=stale_days)
+    if as_json:
+        import json
+
+        click.echo(json.dumps(report, indent=2))
+        return
+    c = report["counts"]
+    console.print(
+        Panel(
+            f"Items: [cyan]{c['items']}[/] (active {c['status_active']}, "
+            f"superseded {c['status_superseded']}, done {c['status_done']})\n"
+            f"Corroborated by ≥2 imports: [green]{c['corroborated']}[/] · "
+            f"single sighting: {c['single_sighting']}\n"
+            f"Stale (not seen for {stale_days}+ days): "
+            f"[{'yellow' if c['stale'] else 'green'}]{c['stale']}[/] · "
+            f"Open tasks: {c['open_tasks']} · "
+            f"Pending conflicts: [{'red' if c['pending_conflicts'] else 'green'}]"
+            f"{c['pending_conflicts']}[/]\n"
+            f"Shared with a cloud model: [{'red' if c['shared_with_cloud'] else 'green'}]"
+            f"{c['shared_with_cloud']}[/] · never shared anywhere: {c['never_shared']} · "
+            f"egress events: {c['egress_events']}",
+            title=f"Memory health — {name} v{report['version']}",
+            border_style="cyan",
+        )
+    )
+    if report["stale_items"]:
+        console.print("\n[bold yellow]Stale items[/] (confirm, supersede, or remove):")
+        for i in report["stale_items"][:20]:
+            console.print(
+                f"  • {i['content']}  [dim]({i['days_since_seen']} days; id {i['id']})[/]"
+            )
+    if report["open_tasks"]:
+        console.print("\n[bold]Open tasks[/] (cb done NAME ID when finished):")
+        for i in report["open_tasks"][:20]:
+            console.print(f"  • {i['content']}  [dim](id {i['id']})[/]")
+    if report["handoffs"]:
+        console.print(f"\n[dim]Hand-offs recorded: {len(report['handoffs'])}[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -806,10 +1054,45 @@ def _display_memory(memory: StructuredMemory, *, title: str | None = None, show_
                 bits.append(f"{item.confidence:.0%}")
             if item.was_redacted:
                 bits.append("redacted")
+            if item.sharing == SharingPolicy.LOCAL_ONLY:
+                bits.append("[yellow]local only[/]")
+            elif item.sharing == SharingPolicy.NEVER:
+                bits.append("[red]never share[/]")
+            if item.status == ItemStatus.SUPERSEDED:
+                bits.append(f"[red]superseded[/] by {item.superseded_by}")
+            elif item.status == ItemStatus.DONE:
+                bits.append("[green]done[/]")
+            if item.seen_count > 1:
+                bits.append(f"seen ×{item.seen_count}")
             if show_ids:
                 bits.append(item.id)
             suffix = f" [dim]({' · '.join(bits)})[/]" if bits else ""
-            console.print(f"  • {item.content}{suffix}")
+            marker = "  • " if item.is_active else "  ◦ "
+            style_open, style_close = ("[dim]", "[/]") if not item.is_active else ("", "")
+            console.print(f"{marker}{style_open}{item.content}{style_close}{suffix}")
+
+
+def _display_withheld(withheld) -> None:
+    if not withheld:
+        return
+    console.print(f"\n[yellow]⛔ {len(withheld)} item(s) withheld from this target:[/]")
+    for w in withheld:
+        console.print(f"  ◦ {w.item.content}  [dim]({w.reason}; id {w.item.id})[/]")
+
+
+def _display_pending(pkg, pending) -> None:
+    by_id = pkg.memory.items_by_id()
+    console.print(f"\n[bold red]⚠ {len(pending)} statement(s) may contradict stored memory[/]")
+    for p in pending:
+        a, b = by_id.get(p.existing_id), by_id.get(p.incoming_id)
+        if a is None or b is None:
+            continue
+        console.print(
+            f"[{CATEGORY_LABELS[p.category]}] {p.reason} "
+            f"[dim](sim {p.similarity:.2f}; shared: {', '.join(p.shared_terms)})[/]"
+        )
+        console.print(f"    stored:   {a.content}  [dim]← {a.origin} · id {a.id}[/]")
+        console.print(f"    incoming: {b.content}  [dim]← {b.origin} · id {b.id}[/]")
 
 
 def _source_note(source: str) -> str:

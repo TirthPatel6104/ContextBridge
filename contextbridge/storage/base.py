@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from contextbridge.models import ContextPackage
+from contextbridge.models import ContextPackage, EgressRecord
 
 
 class PackageNotFoundError(FileNotFoundError):
@@ -80,6 +80,39 @@ class StorageBackend(ABC):
     def location(self) -> str:
         """Human-readable description of where data lives."""
         return self.backend_name
+
+    # -- Egress ledger -------------------------------------------------------
+    #
+    # Every prompt build appends a record saying which item ids were rendered
+    # for which target.  The default keeps records in memory (enough for tests
+    # and ad-hoc backends); SQLite and JSON persist them.
+
+    def record_egress(self, record: EgressRecord) -> EgressRecord:
+        """Persist one ledger entry and return it (with an id when the backend assigns one)."""
+        ledger = self._memory_ledger()
+        record.id = len(ledger) + 1
+        ledger.append(record)
+        return record
+
+    def egress_records(self, name: str, *, limit: int = 200) -> list[EgressRecord]:
+        """Ledger entries for a package, newest first."""
+        rows = [r for r in self._memory_ledger() if r.package_name == name]
+        rows.sort(key=lambda r: (r.timestamp, r.id or 0), reverse=True)
+        return rows[:limit]
+
+    def clear_egress(self, name: str) -> int:
+        """Delete the ledger for a package; returns how many entries were removed."""
+        ledger = self._memory_ledger()
+        before = len(ledger)
+        ledger[:] = [r for r in ledger if r.package_name != name]
+        return before - len(ledger)
+
+    def _memory_ledger(self) -> list[EgressRecord]:
+        ledger = getattr(self, "_egress_ledger", None)
+        if ledger is None:
+            ledger = []
+            self._egress_ledger = ledger
+        return ledger
 
     def close(self) -> None:  # pragma: no cover - trivial default
         """Release any resources (connections, handles)."""

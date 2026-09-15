@@ -23,7 +23,7 @@ from contextbridge import __version__
 from contextbridge.config import Settings
 from contextbridge.core.file_parser import parse_file, parse_multiple_files
 from contextbridge.core.redaction import describe_kinds
-from contextbridge.models import MemoryCategory, RetrievalOptions
+from contextbridge.models import ItemStatus, MemoryCategory, RetrievalOptions, SharingPolicy
 from contextbridge.service import ContextBridgeService
 from contextbridge.storage import get_store
 from contextbridge.storage.base import PackageNotFoundError, StorageBackend
@@ -56,6 +56,8 @@ def _parse_options(payload: dict[str, Any]) -> RetrievalOptions:
         kwargs["token_budget"] = int(payload["token_budget"])
     if payload.get("min_score") not in (None, ""):
         kwargs["min_score"] = float(payload["min_score"])
+    if payload.get("include_inactive") not in (None, ""):
+        kwargs["include_inactive"] = _truthy(payload.get("include_inactive"))
     cats = payload.get("categories")
     if cats:
         if isinstance(cats, str):
@@ -164,6 +166,8 @@ def create_app(
                 "redact_by_default": settings.redact_by_default,
                 "redaction_kinds": describe_kinds(),
                 "categories": [c.value for c in MemoryCategory],
+                "sharing_policies": [p.value for p in SharingPolicy],
+                "item_statuses": [s.value for s in ItemStatus],
                 "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
             }
         )
@@ -232,7 +236,11 @@ def create_app(
                 "files_processed": [n for _, n in file_data],
                 "chars_extracted": outcome.chars,
                 "tokens_transcript": outcome.transcript_tokens,
+                "re_seen_items": outcome.re_seen_items,
                 "warnings": outcome.warnings,
+                "notes": outcome.notes,
+                "handoff": outcome.handoff.model_dump(mode="json") if outcome.handoff else None,
+                "conflicts": [c.model_dump(mode="json") for c in outcome.conflicts],
             }
         )
 
@@ -301,6 +309,82 @@ def create_app(
             }
         )
 
+    # -- Sharing boundaries & lifecycle --------------------------------------
+
+    def _ids_from(payload: dict[str, Any]) -> list[str]:
+        ids = payload.get("ids") or []
+        if not isinstance(ids, list):
+            raise ValidationError("'ids' must be a list")
+        return [str(i) for i in ids]
+
+    @app.route("/api/packages/<name>/items/sharing", methods=["POST"])
+    def api_set_sharing(name: str):
+        """JSON: ``ids`` (list), ``policy`` (any | local_only | never)."""
+        payload = request.get_json(silent=True) or {}
+        pkg, changed = svc.set_sharing(name, _ids_from(payload), str(payload.get("policy") or ""))
+        return jsonify(
+            {"success": True, "package_name": pkg.name, "version": pkg.version, "changed": changed}
+        )
+
+    @app.route("/api/packages/<name>/items/status", methods=["POST"])
+    def api_set_status(name: str):
+        """JSON: ``ids`` (list), ``status`` (done | active)."""
+        payload = request.get_json(silent=True) or {}
+        pkg, changed = svc.set_status(name, _ids_from(payload), str(payload.get("status") or ""))
+        return jsonify(
+            {"success": True, "package_name": pkg.name, "version": pkg.version, "changed": changed}
+        )
+
+    @app.route("/api/packages/<name>/items/supersede", methods=["POST"])
+    def api_supersede(name: str):
+        """JSON: ``old_id``, ``new_id``."""
+        payload = request.get_json(silent=True) or {}
+        pkg = svc.supersede(
+            name, str(payload.get("old_id") or ""), str(payload.get("new_id") or "")
+        )
+        return jsonify({"success": True, "package_name": pkg.name, "version": pkg.version})
+
+    @app.route("/api/packages/<name>/conflicts", methods=["GET"])
+    def api_conflicts(name: str):
+        detail = svc.package_to_dict(svc.get_package(name))
+        return jsonify({"package_name": name, "conflicts": detail["pending_conflicts"]})
+
+    @app.route("/api/packages/<name>/conflicts/resolve", methods=["POST"])
+    def api_resolve_conflict(name: str):
+        """JSON: ``existing_id``, ``incoming_id``, ``action`` (keep_new | keep_old | dismiss)."""
+        payload = request.get_json(silent=True) or {}
+        pkg = svc.resolve_conflict(
+            name,
+            str(payload.get("existing_id") or ""),
+            str(payload.get("incoming_id") or ""),
+            str(payload.get("action") or ""),
+        )
+        return jsonify(
+            {
+                "success": True,
+                "package_name": pkg.name,
+                "version": pkg.version,
+                "remaining": len(svc.pending_conflicts(name)),
+            }
+        )
+
+    @app.route("/api/packages/<name>/audit", methods=["GET"])
+    def api_audit(name: str):
+        limit = request.args.get("limit", type=int) or 200
+        return jsonify(svc.audit(name, limit=max(1, min(limit, 1000))))
+
+    @app.route("/api/packages/<name>/audit", methods=["DELETE"])
+    def api_clear_audit(name: str):
+        svc.get_package(name)  # 404 if unknown
+        return jsonify({"success": True, "removed": svc.clear_audit(name)})
+
+    @app.route("/api/packages/<name>/health", methods=["GET"])
+    def api_package_health(name: str):
+        stale_days = request.args.get("stale_days", type=int)
+        if stale_days is None:
+            stale_days = 30
+        return jsonify(svc.health(name, stale_days=max(0, min(stale_days, 3650))))
+
     # -- Retrieval & prompt --------------------------------------------------
 
     @app.route("/api/retrieve", methods=["POST"])
@@ -325,15 +409,7 @@ def create_app(
                         "matched_terms": s.matched_terms,
                         "reason": s.reason,
                         "tokens": s.tokens,
-                        "item": {
-                            "id": s.item.id,
-                            "category": s.item.category.value,
-                            "content": s.item.content,
-                            "confidence": s.item.confidence,
-                            "source": s.item.source,
-                            "origin": s.item.origin,
-                            "redactions": [r.model_dump() for r in s.item.redactions],
-                        },
+                        "item": svc.item_to_dict(s.item),
                     }
                     for s in result.selected
                 ],
@@ -347,13 +423,17 @@ def create_app(
 
         JSON: ``package_name``, ``target_model``, optional ``query`` plus
         retrieval options, ``include_files`` (attached files, default off),
-        ``include_watch`` (watch folder, default off).
+        ``include_watch`` (watch folder, default off), ``surface`` (who is
+        asking: dashboard / extension, for the egress ledger), ``record``
+        (default on; false previews without a ledger entry).
         """
         payload = request.get_json(silent=True) or {}
         name = validate_package_name(payload.get("package_name"))
         target = str(payload.get("target_model") or "claude")
         query = payload.get("query")
         options = _parse_options(payload) if query else None
+        surface = str(payload.get("surface") or "dashboard")[:32]
+        record = _truthy(payload.get("record"), True)
 
         extras: list[tuple[str, str]] = []
         attached: list[str] = []
@@ -366,11 +446,21 @@ def create_app(
             extras.extend(_read_sections(watch_dir, "WATCH FOLDER FILE"))
             watched = [e["name"] for e in _list_dir(watch_dir)]
 
-        built = svc.build_prompt(name, target, query=query, options=options, extras=extras)
+        built = svc.build_prompt(
+            name,
+            target,
+            query=query,
+            options=options,
+            extras=extras,
+            surface=surface,
+            record=record,
+        )
         retrieval = built.pop("retrieval")
         built["retrieval"] = retrieval.summary() if retrieval else None
+        built["withheld"] = svc.withheld_to_dicts(built.pop("withheld"))
         built["attached_files"] = attached
         built["watched_files"] = watched
+        built["recorded"] = record
         built["success"] = True
         return jsonify(built)
 

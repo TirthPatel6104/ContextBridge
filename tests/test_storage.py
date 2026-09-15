@@ -136,7 +136,7 @@ class TestLegacyCompatibility:
         (pkg_dir / "latest.json").write_text(json.dumps(legacy), encoding="utf-8")
 
         loaded = JSONStore(base_dir=tmp_path).load("old")
-        assert loaded.schema_version == 2  # default applied
+        assert loaded.schema_version == 3  # default applied
         assert loaded.memory.identity[0].id
         assert loaded.memory.identity[0].origin == ""
 

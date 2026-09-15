@@ -326,6 +326,9 @@ class MemoryRetriever:
         for idx, item in enumerate(items):
             if allowed is not None and item.category not in allowed:
                 continue
+            if not options.include_inactive and not item.is_active:
+                result.excluded_inactive += 1
+                continue
             lex_score, matched = lexical[idx]
             emb_score = embedding_scores.get(item.id) if embedding_scores else None
             if not has_query:

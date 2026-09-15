@@ -28,7 +28,7 @@ class TestBasics:
     def test_version(self):
         result = _run("--version")
         assert result.exit_code == 0
-        assert "0.2.0" in result.output
+        assert "0.3.0" in result.output
 
     def test_list_empty(self, env):
         result = _run("list")
@@ -145,3 +145,98 @@ class TestWorkflow:
     def test_web_export_reads_stdin(self, env):
         result = _run("web-export", "-o", "pasted", input=SAMPLE_CHAT)
         assert result.exit_code == 0 and "Created package" in result.output
+
+
+class TestTrustCommands:
+    """Sharing boundaries, lifecycle, ledger, and health from the terminal."""
+
+    @staticmethod
+    def _ids(output: str) -> list[str]:
+        import re
+
+        return list(dict.fromkeys(re.findall(r"\b[0-9a-f]{12}\b", output)))
+
+    def test_share_withholds_and_audit_records(self, env):
+        tmp_path, chat = env
+        assert _run("import", str(chat), "-o", "proj").exit_code == 0
+        ids = self._ids(_run("inspect", "proj", "--ids").output)
+        assert ids
+
+        shared = _run("share", "proj", ids[0], "--policy", "local_only")
+        assert shared.exit_code == 0, shared.output
+        assert "local_only" in shared.output
+        again = _run("share", "proj", ids[0], "--policy", "local_only")
+        assert "Nothing changed" in again.output
+        assert _run("share", "proj", "zzz", "--policy", "never").exit_code == 2
+
+        cloud = _run("prompt", "proj", "--model", "claude")
+        assert cloud.exit_code == 0, cloud.output
+        assert "withheld from this target" in cloud.output
+        assert "egress ledger" in cloud.output
+        local = _run("prompt", "proj", "--model", "ollama", "--dry-run")
+        assert "withheld" not in local.output and "Dry run" in local.output
+
+        audit = _run("audit", "proj")
+        assert audit.exit_code == 0, audit.output
+        assert "Events: 1" in audit.output and "claude" in audit.output
+        as_json = json.loads(_run("audit", "proj", "--json").output)
+        assert as_json["summary"]["events"] == 1
+        assert as_json["events"][0]["surface"] == "cli"
+        assert as_json["events"][0]["withheld_count"] == 1
+        cleared = _run("audit", "proj", "--clear")
+        assert "Cleared 1" in cleared.output
+        assert "No prompts have been built" in _run("audit", "proj").output
+
+    def test_done_reopen_supersede_and_health(self, env):
+        tmp_path, chat = env
+        _run("import", str(chat), "-o", "proj")
+        ids = self._ids(_run("inspect", "proj", "--ids").output)
+        assert _run("done", "proj", ids[0]).exit_code == 0
+        inspected = _run("inspect", "proj")
+        assert "done" in inspected.output
+        assert _run("reopen", "proj", ids[0]).exit_code == 0
+        sup = _run("supersede", "proj", ids[0], ids[1])
+        assert sup.exit_code == 0 and "superseded by" in sup.output
+        assert _run("supersede", "proj", ids[1], ids[0]).exit_code == 2
+
+        health = _run("health", "proj", "--stale-days", "0")
+        assert health.exit_code == 0, health.output
+        assert "superseded 1" in health.output
+        report = json.loads(_run("health", "proj", "--json").output)
+        assert report["counts"]["status_superseded"] == 1
+        history = _run("history", "proj")
+        assert "Changed" in history.output
+
+    def test_conflicts_flow(self, env):
+        tmp_path, chat = env
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("User: I decided to use FAISS for vector search.", encoding="utf-8")
+        b.write_text("User: I decided to switch to Qdrant for vector search.", encoding="utf-8")
+        _run("import", str(a), "-o", "proj")
+        second = _run("import", str(b), "-o", "proj")
+        assert second.exit_code == 0, second.output
+        assert "may contradict" in second.output
+
+        listing = _run("conflicts", "proj")
+        assert "stored:" in listing.output and "incoming:" in listing.output
+        ids = self._ids(listing.output)
+        resolved = _run("conflicts", "proj", "--resolve", ids[0], ids[1], "keep_new")
+        assert resolved.exit_code == 0, resolved.output
+        assert "Resolved (keep_new)" in resolved.output
+        assert "No pending conflicts" in resolved.output
+        assert _run("conflicts", "proj", "--resolve", ids[0], ids[1], "dismiss").exit_code == 2
+
+    def test_handoff_import_skips_pasted_block(self, env):
+        tmp_path, chat = env
+        _run("import", str(chat), "-o", "proj")
+        prompt = _run("prompt", "proj", "--model", "claude", "--raw", "--dry-run").output
+        follow = tmp_path / "claude.txt"
+        follow.write_text(
+            "User: " + prompt + "\n\nAssistant: ok\n\nUser: I decided to use Rust.",
+            encoding="utf-8",
+        )
+        result = _run("import", str(follow), "-o", "proj")
+        assert result.exit_code == 0, result.output
+        assert "Hand-off detected" in result.output
+        assert "1 new" in result.output
