@@ -14,6 +14,7 @@ Design
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -21,14 +22,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from contextbridge.models import ContextPackage
+from contextbridge.models import ContextPackage, EgressRecord
 from contextbridge.storage.base import PackageNotFoundError, StorageBackend
 from contextbridge.validation import is_valid_package_name, validate_package_name
 
 logger = logging.getLogger(__name__)
 
 DB_FILENAME = "contextbridge.db"
-USER_VERSION = 1
+USER_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS packages (
@@ -51,6 +52,23 @@ CREATE TABLE IF NOT EXISTS package_versions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at);
+
+CREATE TABLE IF NOT EXISTS egress_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_name    TEXT NOT NULL,
+    package_version INTEGER NOT NULL,
+    timestamp       TEXT NOT NULL,
+    target_model    TEXT NOT NULL,
+    target_kind     TEXT NOT NULL,
+    surface         TEXT NOT NULL DEFAULT '',
+    query           TEXT NOT NULL DEFAULT '',
+    item_ids        TEXT NOT NULL DEFAULT '[]',
+    item_count      INTEGER NOT NULL DEFAULT 0,
+    withheld_count  INTEGER NOT NULL DEFAULT 0,
+    tokens          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_egress_package ON egress_log(package_name, timestamp);
 """
 
 
@@ -183,6 +201,7 @@ class SQLiteStore(StorageBackend):
         with self._lock:
             self._conn.execute("BEGIN")
             self._conn.execute("DELETE FROM package_versions WHERE name = ?", (name,))
+            self._conn.execute("DELETE FROM egress_log WHERE package_name = ?", (name,))
             cur = self._conn.execute("DELETE FROM packages WHERE name = ?", (name,))
             self._conn.execute("COMMIT")
         if cur.rowcount:
@@ -231,17 +250,86 @@ class SQLiteStore(StorageBackend):
             for r in rows
         ]
 
+    # -- Egress ledger -------------------------------------------------------
+
+    def record_egress(self, record: EgressRecord) -> EgressRecord:
+        name = validate_package_name(record.package_name)
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO egress_log
+                    (package_name, package_version, timestamp, target_model, target_kind,
+                     surface, query, item_ids, item_count, withheld_count, tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    record.package_version,
+                    record.timestamp.isoformat(),
+                    record.target_model,
+                    record.target_kind,
+                    record.surface,
+                    record.query,
+                    json.dumps(record.item_ids),
+                    record.item_count,
+                    record.withheld_count,
+                    record.tokens,
+                ),
+            )
+            record.id = int(cur.lastrowid)
+        return record
+
+    def egress_records(self, name: str, *, limit: int = 200) -> list[EgressRecord]:
+        if not is_valid_package_name(name):
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM egress_log WHERE package_name = ?
+                ORDER BY timestamp DESC, id DESC LIMIT ?
+                """,
+                (name.strip(), int(limit)),
+            ).fetchall()
+        return [
+            EgressRecord(
+                id=int(r["id"]),
+                timestamp=datetime.fromisoformat(r["timestamp"]),
+                package_name=r["package_name"],
+                package_version=int(r["package_version"]),
+                target_model=r["target_model"],
+                target_kind=r["target_kind"],
+                surface=r["surface"],
+                query=r["query"],
+                item_ids=json.loads(r["item_ids"] or "[]"),
+                item_count=int(r["item_count"]),
+                withheld_count=int(r["withheld_count"]),
+                tokens=int(r["tokens"]),
+            )
+            for r in rows
+        ]
+
+    def clear_egress(self, name: str) -> int:
+        if not is_valid_package_name(name):
+            return 0
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM egress_log WHERE package_name = ?", (name.strip(),)
+            )
+        return int(cur.rowcount)
+
     # -- Maintenance ---------------------------------------------------------
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
             packages = self._conn.execute("SELECT COUNT(*) FROM packages").fetchone()[0]
             versions = self._conn.execute("SELECT COUNT(*) FROM package_versions").fetchone()[0]
+            egress = self._conn.execute("SELECT COUNT(*) FROM egress_log").fetchone()[0]
         size = self._db_path.stat().st_size if self._db_path.exists() else 0
         return {
             "backend": self.backend_name,
             "path": str(self._db_path),
             "packages": int(packages),
             "versions": int(versions),
+            "egress_events": int(egress),
             "bytes": int(size),
         }

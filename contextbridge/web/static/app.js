@@ -127,6 +127,30 @@ function redactionBadge(redactions) {
   return el('span', { class: 'badge badge-redacted', title: `Redacted: ${kinds}` }, `🔒 redacted (${redactions.map((r) => r.kind).join(', ')})`);
 }
 
+const SHARING_LABELS = { any: 'any target', local_only: 'local models only', never: 'never in a prompt' };
+
+function sharingBadge(sharing) {
+  if (!sharing || sharing === 'any') return null;
+  const cls = sharing === 'never' ? 'badge badge-never' : 'badge badge-sharing';
+  const icon = sharing === 'never' ? '⛔' : '🏠';
+  return el('span', { class: cls, title: 'Sharing policy: who may see this item when a prompt is built' }, `${icon} ${SHARING_LABELS[sharing] || sharing}`);
+}
+
+function statusBadge(item) {
+  if (!item.status || item.status === 'active') return null;
+  if (item.status === 'done') return el('span', { class: 'badge badge-done', title: 'Marked done; not rendered in prompts' }, '✔ done');
+  return el('span', { class: 'badge badge-superseded', title: `Superseded by item ${item.superseded_by}` }, `↦ superseded${item.superseded_by ? ` by ${item.superseded_by}` : ''}`);
+}
+
+function seenBadge(item) {
+  if (!item.seen_count || item.seen_count < 2) return null;
+  return el('span', { class: 'badge badge-seen', title: `This statement appeared in ${item.seen_count} imports (last ${(item.last_seen || '').slice(0, 10)})` }, `seen ×${item.seen_count}`);
+}
+
+function shortDate(iso) {
+  return iso ? iso.slice(0, 16).replace('T', ' ') : '–';
+}
+
 // -------------------------------------------------------------------
 // Init
 // -------------------------------------------------------------------
@@ -138,6 +162,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupRetrieve();
   setupExport();
   setupTools();
+  setupTrust();
   setupQuality();
   await Promise.all([loadHealth(), loadPackages(), loadLocalModels()]);
 });
@@ -291,6 +316,13 @@ function renderImportResult(data) {
   warnings.hidden = !(data.warnings && data.warnings.length);
   (data.warnings || []).forEach((w) => warnings.append(el('li', { text: w })));
 
+  const notes = $('import-notes');
+  notes.replaceChildren();
+  const noteText = [...(data.notes || [])];
+  if (data.re_seen_items) noteText.push(`${data.re_seen_items} item(s) were already known and are now corroborated by one more conversation.`);
+  notes.hidden = !noteText.length;
+  noteText.forEach((n) => notes.append(el('li', { text: n })));
+
   const red = $('import-redaction');
   red.replaceChildren();
   if (data.redaction && data.redaction.total > 0) {
@@ -348,6 +380,10 @@ function clearActivePackage() {
   $('retrieve-empty').hidden = false;
   $('prompt-result').hidden = true;
   state.lastRetrieval = null;
+  $('trust-body').hidden = true;
+  $('trust-empty').hidden = false;
+  $('trust-refresh-btn').disabled = true;
+  $('clear-ledger-btn').disabled = true;
 }
 
 async function selectPackage(name) {
@@ -364,6 +400,9 @@ async function selectPackage(name) {
     link.setAttribute('download', `${name}.contextbridge.json`);
     link.hidden = false;
     $('retrieve-empty').textContent = `Run a query against "${name}" to preview which items would be included.`;
+    $('trust-refresh-btn').disabled = false;
+    $('clear-ledger-btn').disabled = false;
+    await loadTrust(name);
   } catch (err) {
     clearActivePackage();
     showError('review-error', err.message);
@@ -385,6 +424,27 @@ function setupReview() {
     if (e.target.matches('input[type="checkbox"][data-item-id]')) updateRemoveButton();
   });
   $('remove-selected-btn').addEventListener('click', removeSelectedItems);
+  $('apply-sharing-btn').addEventListener('click', () => itemAction('sharing', { policy: $('sharing-policy').value }, `Sharing set to "${SHARING_LABELS[$('sharing-policy').value]}"`));
+  $('mark-done-btn').addEventListener('click', () => itemAction('status', { status: 'done' }, 'Marked done'));
+  $('reopen-btn').addEventListener('click', () => itemAction('status', { status: 'active' }, 'Reactivated'));
+  $('conflict-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn || !state.activePackage) return;
+    const { existingId, incomingId, action } = btn.dataset;
+    setBusy(btn, true, 'Saving…');
+    try {
+      const data = await api(`/api/packages/${encodeURIComponent(state.activePackage.name)}/conflicts/resolve`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ existing_id: existingId, incoming_id: incomingId, action }),
+      });
+      toast(`Conflict resolved → v${data.version}${data.remaining ? ` · ${data.remaining} remaining` : ''}`, 'success');
+      await loadPackages();
+      await selectPackage(state.activePackage.name);
+    } catch (err) {
+      showError('review-error', err.message);
+      setBusy(btn, false);
+    }
+  });
   $('history-table').addEventListener('click', async (e) => {
     const btn = e.target.closest('button[data-version]');
     if (!btn || !state.activePackage) return;
@@ -404,20 +464,73 @@ function setupReview() {
   });
 }
 
+function selectedItemIds() {
+  return Array.from(document.querySelectorAll('#memory-groups input[type="checkbox"][data-item-id]:checked')).map((c) => c.dataset.itemId);
+}
+
 function updateRemoveButton() {
-  const count = document.querySelectorAll('#memory-groups input[type="checkbox"][data-item-id]:checked').length;
+  const count = selectedItemIds().length;
   const btn = $('remove-selected-btn');
   btn.disabled = count === 0;
   btn.textContent = count ? `Remove ${count} selected` : 'Remove selected';
+  for (const id of ['apply-sharing-btn', 'mark-done-btn', 'reopen-btn']) $(id).disabled = count === 0;
+}
+
+async function itemAction(kind, body, label) {
+  if (!state.activePackage) return;
+  const ids = selectedItemIds();
+  if (!ids.length) return;
+  showError('review-error');
+  try {
+    const data = await api(`/api/packages/${encodeURIComponent(state.activePackage.name)}/items/${kind}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, ...body }),
+    });
+    if (data.changed) toast(`${label} for ${data.changed} item(s) → v${data.version}`, 'success');
+    else toast('Nothing changed — the selected items already had that setting', 'info');
+    await loadPackages();
+    await selectPackage(state.activePackage.name);
+  } catch (err) {
+    showError('review-error', err.message);
+  }
+}
+
+function renderConflicts(detail) {
+  const panel = $('conflict-panel');
+  const list = $('conflict-list');
+  list.replaceChildren();
+  const conflicts = detail.pending_conflicts || [];
+  panel.hidden = !conflicts.length;
+  for (const c of conflicts) {
+    const btn = (action, text, cls) => el('button', {
+      type: 'button', class: `btn btn-sm ${cls}`, dataset: { action, existingId: c.existing_id, incomingId: c.incoming_id },
+    }, text);
+    list.append(el('li', {}, [
+      el('p', {}, [categoryChip(c.category), ' ', el('strong', { text: c.reason }), el('span', { class: 'muted small', text: ` (similarity ${c.similarity.toFixed(2)}; shared: ${c.shared_terms.join(', ')})` })]),
+      el('div', { class: 'conflict-pair' }, [
+        el('p', {}, [el('strong', { text: 'Stored: ' }), c.existing.content, el('span', { class: 'muted small', text: ` — from ${c.existing.origin}, seen ×${c.existing.seen_count}` })]),
+        el('p', {}, [el('strong', { text: 'New: ' }), c.incoming.content, el('span', { class: 'muted small', text: ` — from ${c.incoming.origin}` })]),
+      ]),
+      el('div', { class: 'conflict-actions' }, [
+        btn('keep_new', 'New replaces stored', 'btn-primary'),
+        btn('keep_old', 'Stored stays, retire new', 'btn-ghost'),
+        btn('dismiss', 'Both stand', 'btn-ghost'),
+      ]),
+    ]));
+  }
 }
 
 function renderReview(detail) {
   $('review-empty').hidden = true;
   $('review-body').hidden = false;
   const redacted = Object.values(detail.memory).flat().filter((i) => i.redactions && i.redactions.length).length;
+  const st = detail.status_counts || {};
+  const sh = detail.sharing_counts || {};
+  const restricted = (sh.local_only || 0) + (sh.never || 0);
   $('review-meta').textContent =
-    `${detail.name} v${detail.version} · ${detail.total_items} items · source: ${detail.source_model || 'unknown'} · ` +
-    `≈ ${fmt(detail.tokens_full_memory)} tokens if sent in full · ${redacted} redacted item(s) · updated ${detail.updated_at.slice(0, 16).replace('T', ' ')}`;
+    `${detail.name} v${detail.version} · ${detail.total_items} items (${st.active ?? detail.total_items} active` +
+    `${st.superseded ? `, ${st.superseded} superseded` : ''}${st.done ? `, ${st.done} done` : ''}) · source: ${detail.source_model || 'unknown'} · ` +
+    `≈ ${fmt(detail.tokens_full_memory)} tokens if sent in full · ${redacted} redacted · ${restricted} sharing-restricted · updated ${shortDate(detail.updated_at)}`;
+  renderConflicts(detail);
 
   const groups = $('memory-groups');
   groups.replaceChildren();
@@ -447,6 +560,7 @@ function renderReview(detail) {
       el('td', { text: entry.note || '—' }),
       el('td', { text: String(entry.added) }),
       el('td', { text: String(entry.removed) }),
+      el('td', { text: String(entry.modified || 0) }),
       el('td', {}, isCurrent || entry.version >= detail.version ? null : el('button', { type: 'button', class: 'btn btn-ghost btn-sm', dataset: { version: String(entry.version) } }, `Roll back to v${entry.version}`)),
     ]));
   }
@@ -454,7 +568,8 @@ function renderReview(detail) {
 
 function renderMemoryItem(item) {
   const checkboxId = `item-${item.id}`;
-  return el('li', { class: 'memory-item' }, [
+  const inactive = item.status && item.status !== 'active';
+  return el('li', { class: `memory-item${inactive ? ' inactive' : ''}` }, [
     el('input', { type: 'checkbox', id: checkboxId, dataset: { itemId: item.id }, 'aria-label': `Select item: ${item.content}` }),
     el('div', { class: 'memory-item-body' }, [
       el('label', { for: checkboxId, class: 'memory-content', text: item.content }),
@@ -463,6 +578,10 @@ function renderMemoryItem(item) {
         el('span', { class: 'muted', text: `${Math.round(item.confidence * 100)}% confidence` }),
         item.origin ? el('span', { class: 'muted', title: 'Where this item came from', text: `from ${item.origin}` }) : null,
         el('span', { class: 'muted', text: `≈ ${item.tokens} tok` }),
+        el('span', { class: 'muted', title: 'First seen / last seen', text: `seen ${shortDate(item.last_seen).slice(0, 10)}` }),
+        seenBadge(item),
+        statusBadge(item),
+        sharingBadge(item.sharing),
         redactionBadge(item.redactions),
       ]),
       sourceNode(item.source),
@@ -472,7 +591,7 @@ function renderMemoryItem(item) {
 
 async function removeSelectedItems() {
   if (!state.activePackage) return;
-  const ids = Array.from(document.querySelectorAll('#memory-groups input[type="checkbox"][data-item-id]:checked')).map((c) => c.dataset.itemId);
+  const ids = selectedItemIds();
   if (!ids.length) return;
   const btn = $('remove-selected-btn');
   setBusy(btn, true, 'Removing…');
@@ -593,6 +712,7 @@ function renderRetrieval(data) {
   const dropped = [];
   if (s.dropped_below_min_score) dropped.push(`${s.dropped_below_min_score} below the minimum score`);
   if (s.dropped_for_budget) dropped.push(`${s.dropped_for_budget} skipped to respect the token budget`);
+  if (s.excluded_inactive) dropped.push(`${s.excluded_inactive} superseded or done item(s) not considered`);
   $('retrieve-dropped').textContent = dropped.length ? `Not included: ${dropped.join(' · ')}.` : '';
 }
 
@@ -610,6 +730,8 @@ function setupExport() {
       package_name: state.activePackage.name,
       target_model: $('target-model').value,
       include_files: $('include-files').checked,
+      record: $('record-egress').checked,
+      surface: 'dashboard',
     };
     if (scope === 'retrieval') {
       if (!state.lastRetrieval || !state.lastRetrieval.query) {
@@ -626,12 +748,25 @@ function setupExport() {
       $('prompt-output').value = data.prompt;
       const saved = data.tokens_full_prompt - data.tokens_prompt;
       $('prompt-meta').textContent =
-        `Ready for ${data.target_name} · ${data.included_items} of ${data.total_items} items · ≈ ${fmt(data.tokens_prompt)} tokens` +
+        `Ready for ${data.target_name} (${data.target_kind} target) · ${data.included_items} of ${data.total_items} items · ≈ ${fmt(data.tokens_prompt)} tokens` +
         (data.retrieval ? ` (≈ ${fmt(Math.max(0, saved))} fewer than the full package)` : '') +
-        (data.attached_files.length ? ` · includes ${data.attached_files.length} attached file(s)` : '');
+        (data.attached_files.length ? ` · includes ${data.attached_files.length} attached file(s)` : '') +
+        (data.recorded ? ` · ledger event #${data.egress_id}` : ' · not recorded (preview)');
+      const withheldBox = $('prompt-withheld');
+      withheldBox.replaceChildren();
+      if (data.withheld && data.withheld.length) {
+        withheldBox.append(
+          el('strong', { text: `⛔ ${data.withheld.length} item(s) withheld from this target` }),
+          el('ul', {}, data.withheld.map((w) => el('li', {}, [w.content, el('span', { class: 'muted small', text: ` — ${w.reason}` })]))),
+        );
+        withheldBox.hidden = false;
+      } else {
+        withheldBox.hidden = true;
+      }
       $('prompt-result').hidden = false;
       $('copy-btn').disabled = false;
       toast('Prompt generated', 'success');
+      if (data.recorded) loadTrust(state.activePackage.name);
     } catch (err) {
       showError('prompt-error', err.message);
     } finally {
@@ -778,6 +913,96 @@ function renderMerge(data) {
   }
   if (!data.duplicates.length && !data.conflicts.length) box.append(el('p', { class: 'help', text: 'No duplicates or conflicts detected.' }));
   box.hidden = false;
+}
+
+// -------------------------------------------------------------------
+// Trust: egress ledger & memory health
+// -------------------------------------------------------------------
+
+function setupTrust() {
+  $('trust-refresh-btn').addEventListener('click', () => state.activePackage && loadTrust(state.activePackage.name));
+  $('stale-days').addEventListener('change', () => state.activePackage && loadTrust(state.activePackage.name));
+  $('clear-ledger-btn').addEventListener('click', async () => {
+    if (!state.activePackage) return;
+    if (!window.confirm(`Clear the egress ledger for "${state.activePackage.name}"? The memory itself is not touched.`)) return;
+    try {
+      const data = await api(`/api/packages/${encodeURIComponent(state.activePackage.name)}/audit`, { method: 'DELETE' });
+      toast(`Removed ${data.removed} ledger entr${data.removed === 1 ? 'y' : 'ies'}`, 'success');
+      await loadTrust(state.activePackage.name);
+    } catch (err) {
+      showError('trust-error', err.message);
+    }
+  });
+}
+
+async function loadTrust(name) {
+  showError('trust-error');
+  const staleDays = Number($('stale-days').value) || 30;
+  try {
+    const [audit, health] = await Promise.all([
+      api(`/api/packages/${encodeURIComponent(name)}/audit`),
+      api(`/api/packages/${encodeURIComponent(name)}/health?stale_days=${staleDays}`),
+    ]);
+    renderTrust(audit, health);
+  } catch (err) {
+    showError('trust-error', err.message);
+  }
+}
+
+function renderTrust(audit, health) {
+  $('trust-empty').hidden = true;
+  $('trust-body').hidden = false;
+  const s = audit.summary;
+  const c = health.counts;
+  const stat = (label, value, cls) => el('div', {}, [el('dt', { text: label }), el('dd', { class: cls || '', text: String(value) })]);
+  $('ledger-summary').replaceChildren(
+    stat('Prompts built', s.events),
+    stat('Items ever shared', s.items_shared),
+    stat('Sent to a cloud model', s.items_shared_with_cloud, s.items_shared_with_cloud ? 'warn' : 'ok'),
+    stat('Never shared', s.items_never_shared, 'ok'),
+    stat('Corroborated (≥2 imports)', c.corroborated),
+    stat(`Stale (${health.stale_days}+ days)`, c.stale, c.stale ? 'warn' : 'ok'),
+    stat('Open tasks', c.open_tasks),
+    stat('Pending conflicts', c.pending_conflicts, c.pending_conflicts ? 'warn' : 'ok'),
+  );
+
+  const tbody = $('ledger-table').querySelector('tbody');
+  tbody.replaceChildren();
+  $('ledger-empty').hidden = audit.events.length > 0;
+  $('ledger-table').hidden = audit.events.length === 0;
+  for (const e of audit.events) {
+    tbody.append(el('tr', {}, [
+      el('td', { text: String(e.id) }),
+      el('td', { text: shortDate(e.timestamp) }),
+      el('td', { text: e.target_model }),
+      el('td', {}, el('span', { class: e.target_kind === 'cloud' ? 'kind-cloud' : 'kind-local', text: e.target_kind })),
+      el('td', { text: e.surface }),
+      el('td', { text: String(e.item_count) }),
+      el('td', { text: String(e.withheld_count) }),
+      el('td', { class: 'muted', text: e.query || '—' }),
+    ]));
+  }
+
+  const cloud = audit.items.filter((i) => i.sent_to_cloud);
+  const cloudBox = $('cloud-items');
+  const cloudList = $('cloud-items-list');
+  cloudList.replaceChildren();
+  cloudBox.hidden = !cloud.length;
+  cloudBox.querySelector('summary').textContent = `Items that have been sent to a cloud model (${cloud.length})`;
+  for (const i of cloud) {
+    const targets = Object.entries(i.targets).map(([t, n]) => `${t} ×${n}`).join(', ');
+    cloudList.append(el('li', {}, [i.content, el('span', { class: 'muted small', text: ` — ${targets}${i.present ? '' : ' (no longer in package)'}` })]));
+  }
+
+  const lists = $('health-lists');
+  lists.replaceChildren();
+  const block = (title, items, render) => {
+    if (!items.length) return;
+    lists.append(el('div', {}, [el('h4', { text: title }), el('ul', {}, items.map(render))]));
+  };
+  block('Stale items — confirm, supersede, or remove', health.stale_items, (i) => el('li', {}, [i.content, el('span', { class: 'muted small', text: ` — ${i.days_since_seen} days since last seen` })]));
+  block('Open tasks — select in step 2 and "Mark done" when finished', health.open_tasks, (i) => el('li', { text: i.content }));
+  block('Hand-offs recorded', health.handoffs, (h) => el('li', { text: `${shortDate(h.detected_at)} · from ${h.package_name} v${h.package_version}${h.origin ? ` · ${h.origin}` : ''}` }));
 }
 
 // -------------------------------------------------------------------

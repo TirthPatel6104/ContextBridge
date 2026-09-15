@@ -9,6 +9,7 @@ written by earlier versions keep validating.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -16,8 +17,9 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 #: Bumped whenever the on-disk package shape changes in a way that matters
-#: for readers.  Version 1 packages (no item ids / origins) still load.
-SCHEMA_VERSION = 2
+#: for readers.  Version 1 packages (no item ids / origins) still load, and so
+#: do version 2 packages (no sharing policy / lifecycle fields).
+SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Memory Categories
@@ -63,6 +65,39 @@ class RedactionRecord(BaseModel):
     count: int = Field(default=1, ge=1)
 
 
+class SharingPolicy(StrEnum):
+    """Who an item may be shown to when a prompt is built.
+
+    * ``any``        – may go to any target (default).
+    * ``local_only`` – only rendered for local models (Ollama); withheld from
+                       ChatGPT / Claude and any other cloud target.
+    * ``never``      – kept for your own reference, never rendered in a prompt.
+    """
+
+    ANY = "any"
+    LOCAL_ONLY = "local_only"
+    NEVER = "never"
+
+
+class ItemStatus(StrEnum):
+    """Lifecycle state of a memory item.
+
+    Only ``active`` items are retrieved or rendered.  ``superseded`` items are
+    kept for history and point at the item that replaced them; ``done`` marks a
+    completed open task.
+    """
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    DONE = "done"
+
+
+#: Item fields whose changes are recorded in the version history so that a
+#: rollback restores them.  Content changes produce a new id and therefore show
+#: up as add/remove instead.
+TRACKED_ITEM_FIELDS: tuple[str, ...] = ("status", "superseded_by", "sharing")
+
+
 class MemoryItem(BaseModel):
     """A single piece of extracted memory."""
 
@@ -76,6 +111,16 @@ class MemoryItem(BaseModel):
         description="Where the item came from: file name, conversation title, or package",
     )
     redactions: list[RedactionRecord] = Field(default_factory=list)
+    sharing: SharingPolicy = Field(
+        default=SharingPolicy.ANY, description="Which targets may see this item in a prompt"
+    )
+    status: ItemStatus = Field(default=ItemStatus.ACTIVE)
+    superseded_by: str = Field(default="", description="Id of the item that replaced this one")
+    first_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    seen_count: int = Field(
+        default=1, ge=1, description="How many imports have produced this statement"
+    )
     embedding: list[float] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
@@ -87,6 +132,14 @@ class MemoryItem(BaseModel):
     @property
     def was_redacted(self) -> bool:
         return bool(self.redactions)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == ItemStatus.ACTIVE
+
+    def tracked_fields(self) -> dict[str, str]:
+        """The versioned lifecycle / sharing fields as plain strings."""
+        return {name: str(getattr(self, name)) for name in TRACKED_ITEM_FIELDS}
 
 
 class StructuredMemory(BaseModel):
@@ -140,6 +193,23 @@ class StructuredMemory(BaseModel):
             result.set_category(cat, [i for i in self.get_category(cat) if i.id not in drop])
         return result
 
+    def select(self, predicate: Callable[[MemoryItem], bool]) -> StructuredMemory:
+        """Return a copy containing only the items for which *predicate* is true."""
+        result = StructuredMemory()
+        for cat in MemoryCategory:
+            result.set_category(cat, [i for i in self.get_category(cat) if predicate(i)])
+        return result
+
+    def active(self) -> StructuredMemory:
+        """Only items that are still current (not superseded, not done)."""
+        return self.select(lambda i: i.is_active)
+
+    def status_counts(self) -> dict[str, int]:
+        counts = {status.value: 0 for status in ItemStatus}
+        for item in self.all_items:
+            counts[item.status.value] += 1
+        return counts
+
     @classmethod
     def from_items(cls, items: list[MemoryItem]) -> StructuredMemory:
         memory = cls()
@@ -171,11 +241,20 @@ class StructuredMemory(BaseModel):
 
 
 class ContextDiff(BaseModel):
-    """Diff between two context package versions."""
+    """Diff between two context package versions.
+
+    ``modified`` entries describe lifecycle / sharing changes on items that
+    kept their id: ``{"id", "category", "before": {...}, "after": {...}}`` with
+    the :data:`TRACKED_ITEM_FIELDS` values on both sides.
+    """
 
     added: list[MemoryItem] = Field(default_factory=list)
     removed: list[MemoryItem] = Field(default_factory=list)
     modified: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.added or self.removed or self.modified)
 
 
 class ContextVersion(BaseModel):
@@ -243,6 +322,9 @@ class RetrievalOptions(BaseModel):
         default=None, ge=1, description="Stop selecting once this many estimated tokens are used"
     )
     min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    include_inactive: bool = Field(
+        default=False, description="Also consider superseded / done items (off by default)"
+    )
 
 
 class ScoredItem(BaseModel):
@@ -267,6 +349,7 @@ class RetrievalResult(BaseModel):
     selected: list[ScoredItem] = Field(default_factory=list)
     total_items: int = 0
     considered: int = 0
+    excluded_inactive: int = 0
     dropped_below_min_score: int = 0
     dropped_for_budget: int = 0
     tokens_selected: int = 0
@@ -300,7 +383,41 @@ class RetrievalResult(BaseModel):
             "tokens_saved_vs_transcript": self.tokens_saved_vs_transcript,
             "dropped_below_min_score": self.dropped_below_min_score,
             "dropped_for_budget": self.dropped_for_budget,
+            "excluded_inactive": self.excluded_inactive,
         }
+
+
+# ---------------------------------------------------------------------------
+# Sharing boundaries & egress ledger
+# ---------------------------------------------------------------------------
+
+
+class WithheldItem(BaseModel):
+    """An item that was deliberately left out of a prompt, and why."""
+
+    item: MemoryItem
+    reason: str
+
+
+class EgressRecord(BaseModel):
+    """One entry in the egress ledger: what was rendered for which target.
+
+    The ledger stores item *ids* and counts, never the rendered text, so the
+    audit trail itself does not become a second copy of your memory.
+    """
+
+    id: int | None = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    package_name: str
+    package_version: int
+    target_model: str
+    target_kind: str = Field(description="'cloud' or 'local'")
+    surface: str = Field(default="cli", description="cli, dashboard, extension, api, query")
+    query: str = ""
+    item_ids: list[str] = Field(default_factory=list)
+    item_count: int = 0
+    withheld_count: int = 0
+    tokens: int = 0
 
 
 # ---------------------------------------------------------------------------

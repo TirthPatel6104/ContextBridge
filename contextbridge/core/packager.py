@@ -18,6 +18,7 @@ from contextbridge.models import (
     ContextPackage,
     ContextVersion,
     MemoryCategory,
+    MemoryItem,
     StructuredMemory,
 )
 
@@ -97,10 +98,28 @@ class ContextPackager:
         source_model: str = "",
         note: str = "",
     ) -> ContextPackage:
-        """Add new items to the existing memory (exact-duplicate safe) as a new version."""
-        return self.update(
-            package, package.memory.merge(extra_memory), source_model=source_model, note=note
-        )
+        """Add new items to the existing memory as a new version.
+
+        Items that already exist (same id) are not duplicated; instead their
+        sighting counters and origins are updated (see
+        :func:`contextbridge.core.lifecycle.absorb`).
+        """
+        from contextbridge.core.lifecycle import absorb
+
+        merged, _added, _seen = absorb(package.memory, extra_memory)
+        return self.update(package, merged, source_model=source_model, note=note)
+
+    def apply(
+        self,
+        package: ContextPackage,
+        new_memory: StructuredMemory,
+        *,
+        note: str,
+    ) -> ContextPackage:
+        """Record a status / sharing change as a new version (no-op if nothing changed)."""
+        if self.diff(package.memory, new_memory).is_empty:
+            return package
+        return self.update(package, new_memory, note=note)
 
     def remove_items(
         self,
@@ -118,12 +137,32 @@ class ContextPackager:
         return self.update(package, package.memory.without_ids(drop), note=note)
 
     def diff(self, old_memory: StructuredMemory, new_memory: StructuredMemory) -> ContextDiff:
-        """Compute the diff between two StructuredMemory instances (by item id)."""
-        old_ids = {item.id for item in old_memory.all_items}
-        new_ids = {item.id for item in new_memory.all_items}
-        added = [item for item in new_memory.all_items if item.id not in old_ids]
-        removed = [item for item in old_memory.all_items if item.id not in new_ids]
-        return ContextDiff(added=added, removed=removed)
+        """Compute the diff between two StructuredMemory instances (by item id).
+
+        Besides added / removed items, lifecycle and sharing changes on items
+        that kept their id are recorded as ``modified`` entries so that a
+        rollback can undo them.
+        """
+        old_by_id = old_memory.items_by_id()
+        new_by_id = new_memory.items_by_id()
+        added = [item for item in new_memory.all_items if item.id not in old_by_id]
+        removed = [item for item in old_memory.all_items if item.id not in new_by_id]
+        modified: list[dict[str, Any]] = []
+        for item_id, new_item in new_by_id.items():
+            old_item = old_by_id.get(item_id)
+            if old_item is None:
+                continue
+            before, after = old_item.tracked_fields(), new_item.tracked_fields()
+            if before != after:
+                modified.append(
+                    {
+                        "id": item_id,
+                        "category": new_item.category.value,
+                        "before": before,
+                        "after": after,
+                    }
+                )
+        return ContextDiff(added=added, removed=removed, modified=modified)
 
     def rollback(self, package: ContextPackage, target_version: int) -> ContextPackage:
         """
@@ -154,6 +193,20 @@ class ContextPackager:
                 package.memory.set_category(cat, [i for i in items if i.id not in added_ids])
             for item in last.diff.removed:
                 package.memory.get_category(item.category).append(item)
+            if last.diff.modified:
+                restore = {m["id"]: m.get("before", {}) for m in last.diff.modified}
+                for cat in MemoryCategory:
+                    items = package.memory.get_category(cat)
+                    package.memory.set_category(
+                        cat,
+                        [
+                            # Re-validate so enum fields come back as enums, not strings.
+                            MemoryItem.model_validate({**i.model_dump(), **restore[i.id]})
+                            if i.id in restore
+                            else i
+                            for i in items
+                        ],
+                    )
             package.history.pop()
             package.version -= 1
 
@@ -171,6 +224,7 @@ class ContextPackager:
                 "note": entry.note,
                 "added": len(entry.diff.added),
                 "removed": len(entry.diff.removed),
+                "modified": len(entry.diff.modified),
             }
             for entry in package.history
         ]
