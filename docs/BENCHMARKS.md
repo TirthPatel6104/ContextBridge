@@ -33,7 +33,7 @@ The corpus is **not** uniformly random. Uniform high-dimensional vectors are the
 worst case for graph indexes (every point is nearly equidistant from every
 other) and understate HNSW recall badly; a first run with random vectors gave
 recall 0.21 at 50k. Real embeddings have topic structure, so the benchmark draws
-unit vectors around 64 random centres (a mixture of Gaussians, spread 0.35) and
+unit vectors around 64 random centres (a mixture of Gaussians with unit-norm noise scaled by 0.6, so nearest neighbours are meaningfully closer than random points) and
 draws queries the same way.
 
 ## Results (GitHub Actions ubuntu-latest, Python 3.12, pgvector 0.8.x)
