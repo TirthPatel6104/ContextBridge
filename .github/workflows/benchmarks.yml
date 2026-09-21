@@ -13,6 +13,9 @@ on:
       dimension:
         description: "Embedding dimension"
         default: "384"
+      corpus:
+        description: "hierarchical (typical embeddings) or random (adversarial)"
+        default: "hierarchical"
 
 permissions:
   contents: read
@@ -45,6 +48,7 @@ jobs:
           --database-url postgresql://cb:cb@localhost:5432/cb
           --sizes ${{ inputs.sizes }}
           --dimension ${{ inputs.dimension }}
+          --corpus ${{ inputs.corpus }}
           --output benchmarks/results/github-runner.json
           --markdown benchmarks/results/github-runner.md
       - run: cat benchmarks/results/github-runner.md >> "$GITHUB_STEP_SUMMARY"
