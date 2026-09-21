@@ -587,18 +587,21 @@ class PostgresStore(StorageBackend):
                     with contextlib.suppress(Exception):
                         # pgvector >= 0.8: keep scanning until the filter is satisfied.
                         cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
-                # The query vector is sent once (as a CTE) rather than twice.
+                # The query vector appears twice on purpose: the planner only
+                # matches the HNSW expression index when ORDER BY compares the
+                # indexed expression with a constant (a CTE / subquery hides it
+                # and forces an exact scan).
                 cur.execute(
                     f"""
-                    WITH q AS (SELECT %s::vector({dimension}) AS v)
-                    SELECT e.item_id,
-                           1 - (e.embedding::vector({dimension}) <=> q.v) AS similarity
-                    FROM item_embeddings e, q
-                    WHERE e.package_name = %s AND e.model = %s AND e.dimension = %s
-                    ORDER BY e.embedding::vector({dimension}) <=> q.v
+                    SELECT item_id,
+                           1 - (embedding::vector({dimension}) <=> %s::vector({dimension}))
+                               AS similarity
+                    FROM item_embeddings
+                    WHERE package_name = %s AND model = %s AND dimension = %s
+                    ORDER BY embedding::vector({dimension}) <=> %s::vector({dimension})
                     LIMIT %s
                     """,
-                    (literal, name, model, dimension, int(top_k)),
+                    (literal, name, model, dimension, literal, int(top_k)),
                 )
                 rows = cur.fetchall()
                 conn.rollback()
