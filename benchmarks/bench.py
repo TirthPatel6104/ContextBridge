@@ -131,29 +131,41 @@ def bench_storage(sqlite_dir: Path, pg: Any | None, *, repeat: int) -> dict[str,
 # ---------------------------------------------------------------------------
 
 
-def _unit_vectors(n: int, dim: int) -> np.ndarray:
-    v = RNG.standard_normal((n, dim)).astype(np.float32)
-    v /= np.linalg.norm(v, axis=1, keepdims=True)
-    return v
+def _unit(v: np.ndarray) -> np.ndarray:
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
 
 
-def _clustered_vectors(n: int, dim: int, *, clusters: int = 64, spread: float = 0.6) -> np.ndarray:
-    """Unit vectors drawn around *clusters* random centres.
+def make_corpus(kind: str, n: int, queries: int, dim: int) -> tuple[np.ndarray, np.ndarray]:
+    """Synthetic embeddings with a chosen neighbourhood structure.
 
-    Uniformly random high-dimensional vectors are the worst case for graph
-    indexes (every point is almost equidistant from every other), so they
-    understate HNSW recall badly.  Real embeddings live on low-dimensional
-    manifolds with topic structure; a mixture of Gaussians is the standard
-    stand-in.  Query vectors are drawn the same way.
+    ``random``        uniformly random unit vectors.  Every point is almost
+                      equidistant from every other, which is the documented
+                      worst case for graph indexes: an adversarial lower bound.
+    ``hierarchical``  64 topic centres, 32 sub-topics each, points spread
+                      tightly around a sub-topic (relative noise 0.25 inside a
+                      sub-topic, 0.6 between sub-topics of a topic).  Nearest
+                      neighbours are meaningfully closer than random points,
+                      which is what real text embeddings look like.
+
+    Queries are drawn from the same structure as the corpus.
     """
-    centres = RNG.standard_normal((clusters, dim)).astype(np.float32)
-    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
-    assign = RNG.integers(0, clusters, size=n)
-    noise = RNG.standard_normal((n, dim)).astype(np.float32)
-    noise /= np.linalg.norm(noise, axis=1, keepdims=True)  # unit noise, so *spread* is relative
-    v = centres[assign] + spread * noise
-    v /= np.linalg.norm(v, axis=1, keepdims=True)
-    return v
+    if kind == "random":
+        return _unit(RNG.standard_normal((n, dim)).astype(np.float32)), _unit(
+            RNG.standard_normal((queries, dim)).astype(np.float32)
+        )
+    if kind != "hierarchical":
+        raise ValueError(f"unknown corpus kind {kind!r}")
+    clusters, sub, spread, sub_spread = 64, 32, 0.6, 0.25
+    centres = _unit(RNG.standard_normal((clusters, dim)).astype(np.float32))
+    sub_noise = _unit(RNG.standard_normal((clusters, sub, dim)).astype(np.float32))
+    sub_centres = _unit(centres[:, None, :] + spread * sub_noise).reshape(-1, dim)
+
+    def draw(count: int) -> np.ndarray:
+        assign = RNG.integers(0, sub_centres.shape[0], size=count)
+        noise = _unit(RNG.standard_normal((count, dim)).astype(np.float32))
+        return _unit(sub_centres[assign] + sub_spread * noise)
+
+    return draw(n), draw(queries)
 
 
 def _exact_topk(matrix: np.ndarray, queries: np.ndarray, k: int) -> list[list[int]]:
@@ -162,13 +174,25 @@ def _exact_topk(matrix: np.ndarray, queries: np.ndarray, k: int) -> list[list[in
 
 
 def bench_vectors(
-    pg: Any | None, *, n: int, dim: int, queries: int, top_k: int, repeat: int
+    pg: Any | None,
+    *,
+    n: int,
+    dim: int,
+    queries: int,
+    top_k: int,
+    repeat: int,
+    corpus: str = "hierarchical",
 ) -> dict[str, Any]:
-    vectors = _clustered_vectors(n, dim)
+    vectors, qs = make_corpus(corpus, n, queries, dim)
     ids = [f"item{i:07d}" for i in range(n)]
-    qs = _clustered_vectors(queries, dim)
     truth = _exact_topk(vectors, qs, top_k)
-    out: dict[str, Any] = {"n": n, "dimension": dim, "queries": queries, "top_k": top_k}
+    out: dict[str, Any] = {
+        "n": n,
+        "dimension": dim,
+        "queries": queries,
+        "top_k": top_k,
+        "corpus": corpus,
+    }
 
     # FAISS flat (exact inner product)
     faiss_store = VectorStore(dimension=dim)
@@ -345,10 +369,14 @@ def to_markdown(report: dict[str, Any]) -> str:
         )
     lines += [
         "",
-        "## Vector search (top-10, cosine, unit vectors)",
+        f"## Vector search (top-10, cosine, {report.get('corpus', 'hierarchical')} corpus)",
         "",
-        "Corpus: unit vectors around 64 random centres (mixture of Gaussians, "
-        "relative spread 0.6), queries drawn the same way.",
+        (
+            "Corpus: uniformly random unit vectors (adversarial for graph indexes)."
+            if report.get("corpus") == "random"
+            else "Corpus: 64 topics × 32 sub-topics, points tightly around a sub-topic "
+            "(relative noise 0.25 within, 0.6 between); queries drawn from the same structure."
+        ),
         "",
         "| n | dim | Backend | Build | Query median | Query p95 | Recall@10 |",
         "|---|---|---|---|---|---|---|",
@@ -402,6 +430,12 @@ def main() -> None:
     ap.add_argument("--dimension", type=int, default=384)
     ap.add_argument("--queries", type=int, default=200)
     ap.add_argument("--repeat", type=int, default=50)
+    ap.add_argument(
+        "--corpus",
+        choices=["hierarchical", "random"],
+        default="hierarchical",
+        help="Neighbourhood structure of the synthetic vectors (see make_corpus).",
+    )
     ap.add_argument("--output", type=Path, default=None)
     ap.add_argument("--markdown", type=Path, default=None)
     args = ap.parse_args()
@@ -424,6 +458,7 @@ def main() -> None:
 
     report: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "corpus": args.corpus,
         "environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -448,6 +483,7 @@ def main() -> None:
                         queries=args.queries,
                         top_k=10,
                         repeat=args.repeat,
+                        corpus=args.corpus,
                     )
                 )
             print("embedding reuse…", flush=True)

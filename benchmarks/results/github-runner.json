@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-21T22:23:32.999156+00:00",
+  "generated_at": "2026-09-21T22:29:59.884583+00:00",
   "environment": {
     "python": "3.12.14",
     "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
@@ -10,29 +10,29 @@
   "storage": {
     "package_roundtrip": {
       "sqlite": {
-        "median_ms": 0.966,
-        "p95_ms": 1.115,
-        "min_ms": 0.935,
+        "median_ms": 1.024,
+        "p95_ms": 1.374,
+        "min_ms": 0.985,
         "runs": 50
       },
       "postgres": {
-        "median_ms": 3.265,
-        "p95_ms": 3.882,
-        "min_ms": 3.141,
+        "median_ms": 3.625,
+        "p95_ms": 4.823,
+        "min_ms": 3.458,
         "runs": 50
       }
     },
     "listing_200_packages": {
       "sqlite": {
-        "median_ms": 0.39,
-        "p95_ms": 0.403,
-        "min_ms": 0.385,
+        "median_ms": 0.388,
+        "p95_ms": 0.419,
+        "min_ms": 0.382,
         "runs": 50
       },
       "postgres": {
-        "median_ms": 1.933,
-        "p95_ms": 2.56,
-        "min_ms": 1.84,
+        "median_ms": 2.086,
+        "p95_ms": 2.208,
+        "min_ms": 1.957,
         "runs": 50
       }
     }
@@ -45,11 +45,11 @@
       "top_k": 10,
       "faiss_flat": {
         "backend": "faiss",
-        "build_ms": 79.7,
+        "build_ms": 78.0,
         "query": {
-          "median_ms": 0.099,
-          "p95_ms": 0.119,
-          "min_ms": 0.097,
+          "median_ms": 0.097,
+          "p95_ms": 0.122,
+          "min_ms": 0.095,
           "runs": 50
         },
         "recall_at_k": 1.0
@@ -57,30 +57,30 @@
       "numpy_bruteforce": {
         "build_ms": 0.1,
         "query": {
-          "median_ms": 0.067,
-          "p95_ms": 0.081,
-          "min_ms": 0.063,
+          "median_ms": 0.071,
+          "p95_ms": 0.088,
+          "min_ms": 0.067,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_exact": {
-        "insert_ms": 265.6,
+        "insert_ms": 247.7,
         "query": {
-          "median_ms": 1.547,
-          "p95_ms": 1.671,
-          "min_ms": 1.474,
+          "median_ms": 1.744,
+          "p95_ms": 1.838,
+          "min_ms": 1.689,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_hnsw": {
-        "insert_ms": 265.6,
-        "index_build_ms": 197.5,
+        "insert_ms": 247.7,
+        "index_build_ms": 194.9,
         "query": {
-          "median_ms": 1.568,
-          "p95_ms": 1.613,
-          "min_ms": 1.501,
+          "median_ms": 1.736,
+          "p95_ms": 1.782,
+          "min_ms": 1.691,
           "runs": 50
         },
         "recall_at_k": 1.0
@@ -93,45 +93,45 @@
       "top_k": 10,
       "faiss_flat": {
         "backend": "faiss",
-        "build_ms": 340.9,
+        "build_ms": 310.2,
         "query": {
-          "median_ms": 0.633,
-          "p95_ms": 0.662,
-          "min_ms": 0.609,
+          "median_ms": 0.667,
+          "p95_ms": 1.127,
+          "min_ms": 0.613,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "numpy_bruteforce": {
-        "build_ms": 0.9,
+        "build_ms": 1.2,
         "query": {
-          "median_ms": 0.397,
-          "p95_ms": 3.212,
-          "min_ms": 0.371,
+          "median_ms": 0.483,
+          "p95_ms": 1.665,
+          "min_ms": 0.448,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_exact": {
-        "insert_ms": 2625.8,
+        "insert_ms": 2512.6,
         "query": {
-          "median_ms": 7.383,
-          "p95_ms": 9.431,
-          "min_ms": 6.924,
+          "median_ms": 6.034,
+          "p95_ms": 7.832,
+          "min_ms": 5.882,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_hnsw": {
-        "insert_ms": 2625.8,
-        "index_build_ms": 982.6,
+        "insert_ms": 2512.6,
+        "index_build_ms": 958.1,
         "query": {
-          "median_ms": 6.962,
-          "p95_ms": 7.288,
-          "min_ms": 6.669,
+          "median_ms": 1.766,
+          "p95_ms": 1.975,
+          "min_ms": 1.613,
           "runs": 50
         },
-        "recall_at_k": 1.0
+        "recall_at_k": 0.703
       }
     },
     {
@@ -141,45 +141,45 @@
       "top_k": 10,
       "faiss_flat": {
         "backend": "faiss",
-        "build_ms": 1684.8,
+        "build_ms": 1511.1,
         "query": {
-          "median_ms": 4.431,
-          "p95_ms": 4.484,
-          "min_ms": 4.364,
+          "median_ms": 4.759,
+          "p95_ms": 5.276,
+          "min_ms": 4.501,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "numpy_bruteforce": {
-        "build_ms": 4.8,
+        "build_ms": 9.2,
         "query": {
-          "median_ms": 3.667,
-          "p95_ms": 5.486,
-          "min_ms": 3.569,
+          "median_ms": 3.402,
+          "p95_ms": 3.698,
+          "min_ms": 3.281,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_exact": {
-        "insert_ms": 13718.1,
+        "insert_ms": 12868.8,
         "query": {
-          "median_ms": 38.494,
-          "p95_ms": 39.912,
-          "min_ms": 37.746,
+          "median_ms": 22.649,
+          "p95_ms": 27.106,
+          "min_ms": 22.185,
           "runs": 50
         },
         "recall_at_k": 1.0
       },
       "pgvector_hnsw": {
-        "insert_ms": 13718.1,
-        "index_build_ms": 16004.4,
+        "insert_ms": 12868.8,
+        "index_build_ms": 15402.7,
         "query": {
-          "median_ms": 35.806,
-          "p95_ms": 37.527,
-          "min_ms": 34.215,
+          "median_ms": 1.936,
+          "p95_ms": 2.789,
+          "min_ms": 1.83,
           "runs": 50
         },
-        "recall_at_k": 1.0
+        "recall_at_k": 0.3655
       }
     }
   ],
@@ -187,9 +187,9 @@
     "items": 200,
     "dimension": 384,
     "simulated_embed_latency_ms": 50,
-    "in_memory_store_second_query_ms": 116.5,
+    "in_memory_store_second_query_ms": 117.2,
     "in_memory_store_embed_calls_per_query": 2,
-    "pgvector_second_query_ms": 60.7,
+    "pgvector_second_query_ms": 61.0,
     "pgvector_embed_calls_per_query": 1
   }
 }
