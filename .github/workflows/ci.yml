@@ -166,7 +166,7 @@ jobs:
           tags: contextbridge:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: End-to-end smoke test (compose: app + pgvector)
+      - name: "End-to-end smoke test (compose: app + pgvector)"
         run: |
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait
           pip install httpx
