@@ -137,7 +137,7 @@ def _unit_vectors(n: int, dim: int) -> np.ndarray:
     return v
 
 
-def _clustered_vectors(n: int, dim: int, *, clusters: int = 64, spread: float = 0.35) -> np.ndarray:
+def _clustered_vectors(n: int, dim: int, *, clusters: int = 64, spread: float = 0.6) -> np.ndarray:
     """Unit vectors drawn around *clusters* random centres.
 
     Uniformly random high-dimensional vectors are the worst case for graph
@@ -149,7 +149,9 @@ def _clustered_vectors(n: int, dim: int, *, clusters: int = 64, spread: float = 
     centres = RNG.standard_normal((clusters, dim)).astype(np.float32)
     centres /= np.linalg.norm(centres, axis=1, keepdims=True)
     assign = RNG.integers(0, clusters, size=n)
-    v = centres[assign] + spread * RNG.standard_normal((n, dim)).astype(np.float32)
+    noise = RNG.standard_normal((n, dim)).astype(np.float32)
+    noise /= np.linalg.norm(noise, axis=1, keepdims=True)  # unit noise, so *spread* is relative
+    v = centres[assign] + spread * noise
     v /= np.linalg.norm(v, axis=1, keepdims=True)
     return v
 
@@ -203,6 +205,7 @@ def bench_vectors(
     name = "bench_vec"
     pg.save(ContextPackage(name=name))
     pg.delete_embeddings(name)
+    pg.drop_hnsw_index(dim)  # measure bulk insert without index maintenance
     rows = [(ids[i], "h", vectors[i].tolist()) for i in range(n)]
     t0 = time.perf_counter()
     batch = 2000
@@ -345,7 +348,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         "## Vector search (top-10, cosine, unit vectors)",
         "",
         "Corpus: unit vectors around 64 random centres (mixture of Gaussians, "
-        "spread 0.35), queries drawn the same way.",
+        "relative spread 0.6), queries drawn the same way.",
         "",
         "| n | dim | Backend | Build | Query median | Query p95 | Recall@10 |",
         "|---|---|---|---|---|---|---|",
