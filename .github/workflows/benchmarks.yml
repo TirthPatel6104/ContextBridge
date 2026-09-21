@@ -1,0 +1,54 @@
+name: Benchmarks
+
+# Re-runs the storage / vector-search benchmarks on a GitHub runner and uploads
+# the results.  Manual only: the numbers in docs/BENCHMARKS.md are updated by
+# hand from a run so that the published table always names its hardware.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sizes:
+        description: "Comma-separated corpus sizes"
+        default: "1000,10000,50000"
+      dimension:
+        description: "Embedding dimension"
+        default: "384"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cb
+          POSTGRES_PASSWORD: cb
+          POSTGRES_DB: cb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cb -d cb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: >-
+          python benchmarks/bench.py
+          --database-url postgresql://cb:cb@localhost:5432/cb
+          --sizes ${{ inputs.sizes }}
+          --dimension ${{ inputs.dimension }}
+          --output benchmarks/results/github-runner.json
+          --markdown benchmarks/results/github-runner.md
+      - run: cat benchmarks/results/github-runner.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/results/

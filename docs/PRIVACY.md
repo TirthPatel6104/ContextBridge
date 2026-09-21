@@ -90,7 +90,19 @@ Log lines record counts, package names, and exception class names. They never in
 
 ## Local API surface
 
+The FastAPI server (`cb serve`) and the legacy Flask dashboard expose the same routes; the FastAPI server adds `/api/v1`, `/docs`, and the probes described below.
+
 The Flask server is meant to be reached from the dashboard page and from the Chrome extension running on `chatgpt.com` / `claude.ai`. Cross-origin requests from any other website are rejected by CORS, so a malicious page cannot read your packages through your browser. If you change `CB_HOST` to expose the server on a network, put it behind authentication — it has none of its own.
+
+## Running as a shared service
+
+Everything above describes the local-first default. Version 0.4 adds the pieces needed to run ContextBridge for more than one machine, and each one keeps the same rules:
+
+* **PostgreSQL backend.** With `CB_DATABASE_URL` set, packages, version history, the egress ledger and item embeddings live in Postgres instead of a local SQLite file. The DSN password is masked in `cb info`, `/api/v1/health` and every log line. Embeddings stored in `item_embeddings` are vectors plus a hash of the item text; the text itself is only in the package payload.
+* **API key.** Setting `CB_API_KEY` makes every `/api` route require `X-API-Key` (or `Authorization: Bearer`). The key is compared in constant time and never logged. Probes (`/livez`, `/readyz`) stay open and reveal only the backend name. Without a key the API is open, which is fine on `127.0.0.1` and wrong anywhere else.
+* **Tracing.** When an OpenTelemetry endpoint is configured, spans carry package names, item counts, engine and target names, token estimates, and timings. They never carry transcript text, item content, prompts, queries, or keys; the test suite asserts this. See [OBSERVABILITY.md](OBSERVABILITY.md).
+* **Egress from the server itself.** The server only talks to a vendor when an extraction engine or `cb query` target names one, exactly as before. Its own outbound traffic is otherwise limited to the database and, if configured, the trace collector.
+* **Deployment.** The container runs as a non-root user; the reference AWS setup keeps the database private, injects secrets from Secrets Manager, and uses OIDC for deployments rather than long-lived keys. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Deleting data
 

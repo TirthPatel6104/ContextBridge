@@ -18,6 +18,12 @@ from contextbridge.storage.portable import dumps_package, export_package, import
 from contextbridge.storage.sqlite_store import SQLiteStore
 from contextbridge.storage.vector_store import VectorStore
 
+try:  # optional dependency (psycopg + pgvector)
+    from contextbridge.storage.postgres_store import PgVectorStore, PostgresStore
+except Exception:  # pragma: no cover - psycopg not installed
+    PostgresStore = None  # type: ignore[assignment,misc]
+    PgVectorStore = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +33,7 @@ def get_store(
     settings: Settings | None = None,
     base_dir: str | Path | None = None,
     auto_migrate: bool = True,
+    database_url: str | None = None,
 ) -> StorageBackend:
     """
     Instantiate a storage backend.
@@ -34,7 +41,8 @@ def get_store(
     Parameters
     ----------
     backend
-        ``"sqlite"`` (default, recommended) or ``"json"``.  Falls back to
+        ``"sqlite"`` (default), ``"postgres"`` (pgvector-enabled, for
+        deployments) or ``"json"`` (legacy).  Falls back to
         ``settings.storage_backend`` / ``CB_STORAGE_BACKEND``.
     settings
         Explicit settings; built from the environment when omitted.
@@ -42,6 +50,10 @@ def get_store(
         Override the storage directory.
     auto_migrate
         When using SQLite, import legacy JSON packages found in *base_dir*.
+        When using Postgres, apply pending schema migrations.
+    database_url
+        PostgreSQL DSN; falls back to ``settings.database_url`` /
+        ``CB_DATABASE_URL``.
     """
     settings = settings or Settings.from_env()
     chosen = (backend or settings.storage_backend).lower().strip()
@@ -54,7 +66,53 @@ def get_store(
         if auto_migrate:
             import_legacy_json(directory, store)
         return store
-    raise ValueError(f"Unknown storage backend '{chosen}'. Choose from: sqlite, json")
+    if chosen in {"postgres", "postgresql", "pg"}:
+        if PostgresStore is None:
+            raise RuntimeError(
+                "The postgres backend needs 'psycopg[binary,pool]' and 'pgvector': "
+                "pip install 'contextbridge[postgres]'"
+            )
+        dsn = database_url or settings.database_url
+        if not dsn:
+            raise ValueError("CB_DATABASE_URL is required for the postgres backend")
+        return PostgresStore(dsn, migrate=auto_migrate)
+    raise ValueError(f"Unknown storage backend '{chosen}'. Choose from: sqlite, postgres, json")
+
+
+def copy_store(
+    source: StorageBackend,
+    target: StorageBackend,
+    *,
+    overwrite: bool = False,
+    names: list[str] | None = None,
+) -> dict[str, list[str]]:
+    """Copy packages (all versions) and their egress ledgers between backends.
+
+    Used by ``cb migrate --to postgres`` to move a SQLite installation to
+    PostgreSQL.  Nothing is removed from *source*.  Returns which names were
+    copied, skipped (already present in *target* without ``overwrite``), or
+    failed.
+    """
+    report: dict[str, list[str]] = {"copied": [], "skipped": [], "failed": []}
+    for name in names or source.list_packages():
+        if target.exists(name) and not overwrite:
+            report["skipped"].append(name)
+            continue
+        try:
+            versions = source.list_versions(name)
+            for version in versions:
+                target.save(source.load(name, version=version))
+            latest = source.load(name)
+            if not versions or latest.version != versions[-1]:
+                target.save(latest)
+            for record in reversed(source.egress_records(name, limit=100_000)):
+                record.id = None
+                target.record_egress(record)
+            report["copied"].append(name)
+        except Exception as exc:
+            logger.warning("Could not copy package '%s': %s", name, exc.__class__.__name__)
+            report["failed"].append(name)
+    return report
 
 
 def import_legacy_json(base_dir: str | Path, target: StorageBackend) -> list[str]:
@@ -93,7 +151,10 @@ def import_legacy_json(base_dir: str | Path, target: StorageBackend) -> list[str
 
 __all__ = [
     "get_store",
+    "copy_store",
     "import_legacy_json",
+    "PostgresStore",
+    "PgVectorStore",
     "JSONStore",
     "SQLiteStore",
     "VectorStore",

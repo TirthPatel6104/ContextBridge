@@ -56,10 +56,34 @@ function pct(part, whole) {
   return `${Math.round((part / whole) * 100)}%`;
 }
 
+// The API may be guarded by CB_API_KEY when the server is deployed beyond
+// loopback.  The key is kept in localStorage on this browser only and sent as
+// the X-API-Key header; a 401 reveals the inline field to enter it.
+function apiKey() {
+  try { return localStorage.getItem('cb_api_key') || ''; } catch { return ''; }
+}
+
+function setApiKey(value) {
+  try {
+    if (value) localStorage.setItem('cb_api_key', value);
+    else localStorage.removeItem('cb_api_key');
+  } catch { /* storage unavailable */ }
+}
+
+function showApiKeyField(show) {
+  const field = $('api-key-field');
+  if (field) field.hidden = !show;
+}
+
 async function api(url, options = {}) {
+  const key = apiKey();
+  if (key) {
+    options = { ...options, headers: { ...(options.headers || {}), 'X-API-Key': key } };
+  }
   const res = await fetch(url, options);
   let data = null;
   try { data = await res.json(); } catch { data = null; }
+  if (res.status === 401) showApiKeyField(true);
   if (!res.ok) {
     const message = (data && data.error) || `Request failed (${res.status})`;
     throw new Error(message);
@@ -164,13 +188,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupTools();
   setupTrust();
   setupQuality();
+  setupApiKey();
   await Promise.all([loadHealth(), loadPackages(), loadLocalModels()]);
 });
+
+function setupApiKey() {
+  const input = $('api-key');
+  const button = $('api-key-save');
+  if (!input || !button) return;
+  input.value = apiKey();
+  button.addEventListener('click', async () => {
+    setApiKey(input.value.trim());
+    showApiKeyField(false);
+    await Promise.all([loadHealth(), loadPackages(), loadLocalModels()]);
+  });
+}
 
 async function loadHealth() {
   try {
     const health = await api('/api/health');
     state.health = health;
+    if (health.api_key_required) showApiKeyField(false);
     $('status-storage').textContent = health.storage_backend;
     $('status-redaction').textContent = health.redact_by_default ? 'on by default' : 'off by default';
     $('footer-location').textContent = health.storage_location;

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "top_k": 3,
+  "method": "lexical",
+  "pairs": 84,
+  "aggregate": {
+    "hit_at_1": 0.7738,
+    "precision_at_k": 0.3055,
+    "recall_at_k": 0.8413,
+    "mrr": 0.8214,
+    "ndcg_at_k": 0.8152
+  },
+  "by_tag": {
+    "lexical": {
+      "hit_at_1": 1.0,
+      "precision_at_k": 0.3405,
+      "recall_at_k": 0.9891,
+      "mrr": 1.0,
+      "ndcg_at_k": 0.9916,
+      "pairs": 46.0
+    },
+    "multi": {
+      "hit_at_1": 0.7143,
+      "precision_at_k": 0.5238,
+      "recall_at_k": 0.6667,
+      "mrr": 0.8571,
+      "ndcg_at_k": 0.6705,
+      "pairs": 7.0
+    },
+    "paraphrase": {
+      "hit_at_1": 0.5714,
+      "precision_at_k": 0.3214,
+      "recall_at_k": 0.7917,
+      "mrr": 0.7143,
+      "ndcg_at_k": 0.7095,
+      "pairs": 28.0
+    },
+    "semantic": {
+      "hit_at_1": 0.3,
+      "precision_at_k": 0.1,
+      "recall_at_k": 0.3,
+      "mrr": 0.3,
+      "ndcg_at_k": 0.3,
+      "pairs": 10.0
+    }
+  }
+}
