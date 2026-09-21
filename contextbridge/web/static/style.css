@@ -124,6 +124,11 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .status-strip div { display: flex; flex-direction: column; }
 .status-strip dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
 .status-strip dd { margin: 0; font-size: 0.9rem; font-weight: 600; }
+.api-key-field { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; width: 100%; margin-top: 0.75rem; }
+.api-key-field[hidden] { display: none; }
+.api-key-field label { font-weight: 600; }
+.api-key-field input { flex: 1 1 14rem; }
+.api-key-field small { flex-basis: 100%; color: var(--text-muted); }
 
 .stepper { position: sticky; top: 0; z-index: 20; background: var(--bg-elevated); border-bottom: 1px solid var(--border); }
 .stepper ol { list-style: none; margin: 0 auto; padding: 0 clamp(1rem, 4vw, 2.5rem); display: flex; gap: 0.25rem; overflow-x: auto; max-width: 78rem; }

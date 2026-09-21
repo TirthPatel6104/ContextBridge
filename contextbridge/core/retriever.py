@@ -33,6 +33,7 @@ from contextbridge.models import (
     ScoredItem,
     StructuredMemory,
 )
+from contextbridge.telemetry import span
 
 if TYPE_CHECKING:
     from contextbridge.core.llm_interface import LLMInterface
@@ -211,7 +212,7 @@ class MemoryRetriever:
         self._items = list(memory.all_items)
         self._lexical = LexicalScorer(self._items)
         self._embeddings_ready = False
-        if self._store is not None:
+        if self._store is not None and not getattr(self._store, "persistent", False):
             self._store.clear()
         return len(self._items)
 
@@ -237,23 +238,58 @@ class MemoryRetriever:
             )
             return count
         try:
-            embeddings = await adapter.embed_batch([item.content for item in self._items])
-            if len(embeddings) != count or any(not e for e in embeddings):
-                raise ValueError("adapter returned incomplete embeddings")
-            self._store.add([item.id for item in self._items], embeddings)
-            for item, emb in zip(self._items, embeddings):
-                item.embedding = emb
+            if getattr(self._store, "persistent", False):
+                embedded = await self._index_persistent(adapter)
+            else:
+                embeddings = await adapter.embed_batch([item.content for item in self._items])
+                if len(embeddings) != count or any(not e for e in embeddings):
+                    raise ValueError("adapter returned incomplete embeddings")
+                self._store.add([item.id for item in self._items], embeddings)
+                for item, emb in zip(self._items, embeddings):
+                    item.embedding = emb
+                embedded = count
             self._embeddings_ready = True
-            logger.info("Indexed %d items with embeddings via %s", count, adapter.name)
+            logger.info(
+                "Indexed %d items (%d newly embedded) via %s", count, embedded, adapter.name
+            )
         except Exception as exc:  # network / dimension / provider errors
             self._embeddings_ready = False
-            if self._store is not None:
+            if self._store is not None and not getattr(self._store, "persistent", False):
                 self._store.clear()
             logger.warning(
                 "Embedding indexing failed (%s) — falling back to lexical retrieval",
                 exc.__class__.__name__,
             )
         return count
+
+    async def _index_persistent(self, adapter: LLMInterface) -> int:
+        """Embed only the items a persistent store (pgvector) does not know yet.
+
+        Items are matched by id and content hash, so a re-import that changes
+        an item's wording is re-embedded while unchanged items cost nothing.
+        Vectors for items that left the package are removed.
+        """
+        from contextbridge.storage.postgres_store import content_hash
+
+        store = self._store
+        assert store is not None
+        known = store.known_hashes()
+        wanted = {item.id: content_hash(item.content) for item in self._items}
+        stale = [item_id for item_id in known if item_id not in wanted]
+        if stale and hasattr(store, "remove"):
+            store.remove(stale)
+        todo = [item for item in self._items if known.get(item.id) != wanted[item.id]]
+        with span("retriever.embed", total=len(self._items), new=len(todo), stale=len(stale)):
+            if todo:
+                embeddings = await adapter.embed_batch([item.content for item in todo])
+                if len(embeddings) != len(todo) or any(not e for e in embeddings):
+                    raise ValueError("adapter returned incomplete embeddings")
+                store.add(
+                    [item.id for item in todo],
+                    embeddings,
+                    hashes=[wanted[item.id] for item in todo],
+                )
+        return len(todo)
 
     # -- Retrieval -----------------------------------------------------------
 

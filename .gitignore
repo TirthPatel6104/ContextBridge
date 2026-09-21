@@ -41,3 +41,13 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Coverage / reports
+coverage.xml
+reports/
+
+# Terraform
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/*.tfvars
