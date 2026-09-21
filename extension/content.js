@@ -163,7 +163,7 @@ async function generatePrompt(packageName, targetModel) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // Attached files are included only because the user explicitly attached them here.
-        body: JSON.stringify({ package_name: packageName, target_model: targetModel, include_files: true }),
+        body: JSON.stringify({ package_name: packageName, target_model: targetModel, include_files: true, surface: 'extension' }),
     });
 
     if (!res.ok) {
@@ -388,9 +388,12 @@ function createWidget() {
             const fileInfo = result.attached_files && result.attached_files.length > 0
                 ? ` (includes ${result.attached_files.length} files)`
                 : '';
+            const withheld = result.withheld_count
+                ? ` \u2014 ${result.withheld_count} item(s) withheld by sharing policy or status`
+                : '';
 
             showStatus(
-                `\u2705 Copied! Open ${targetName} \u2192 Ctrl+V \u2192 Send${fileInfo}`,
+                `\u2705 Copied! Open ${targetName} \u2192 Ctrl+V \u2192 Send${fileInfo}${withheld}`,
                 'success'
             );
         } catch (err) {
