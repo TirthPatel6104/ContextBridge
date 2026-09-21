@@ -25,6 +25,12 @@
       <div><dt>Redaction</dt><dd id="status-redaction">…</dd></div>
       <div><dt>Data</dt><dd>stays on this machine</dd></div>
     </dl>
+    <form id="api-key-field" class="api-key-field" hidden autocomplete="off">
+      <label for="api-key">This server requires an API key</label>
+      <input id="api-key" type="password" placeholder="X-API-Key" aria-describedby="api-key-help">
+      <button type="button" id="api-key-save" class="secondary">Use key</button>
+      <small id="api-key-help">Stored only in this browser (localStorage).</small>
+    </form>
   </header>
 
   <nav class="stepper" aria-label="Workflow">

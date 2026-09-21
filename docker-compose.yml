@@ -1,0 +1,82 @@
+# Local production-like stack:
+#
+#   docker compose up --build            # app + pgvector Postgres
+#   docker compose --profile observability up --build   # + OpenTelemetry collector + Jaeger UI
+#
+# App:     http://localhost:8000        (dashboard, /docs for OpenAPI)
+# Jaeger:  http://localhost:16686       (traces, observability profile only)
+#
+# The database keeps its data in the ``pgdata`` volume; ``docker compose down -v`` wipes it.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: contextbridge
+      POSTGRES_PASSWORD: contextbridge
+      POSTGRES_DB: contextbridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contextbridge -d contextbridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: contextbridge:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CB_DATABASE_URL: postgresql://contextbridge:contextbridge@db:5432/contextbridge
+      CB_STORAGE_BACKEND: postgres
+      CB_HOST: 0.0.0.0
+      CB_PORT: "8000"
+      CB_ENVIRONMENT: ${CB_ENVIRONMENT:-development}
+      CB_API_KEY: ${CB_API_KEY:-}
+      CB_ALLOWED_ORIGINS: ${CB_ALLOWED_ORIGINS:-https://chatgpt.com,https://chat.openai.com,https://claude.ai}
+      # Tracing is on when the collector profile is running; harmless otherwise.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: contextbridge
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - appdata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    profiles: ["observability"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4318:4318"   # OTLP/HTTP
+      - "4317:4317"   # OTLP/gRPC
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+volumes:
+  pgdata:
+  appdata:

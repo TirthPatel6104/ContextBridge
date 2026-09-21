@@ -65,6 +65,7 @@ from contextbridge.models import (
 from contextbridge.storage.base import PackageNotFoundError, StorageBackend
 from contextbridge.storage.portable import dumps_package, import_package
 from contextbridge.storage.vector_store import VectorStore
+from contextbridge.telemetry import set_attribute, span
 from contextbridge.validation import (
     ValidationError,
     validate_package_name,
@@ -194,7 +195,28 @@ class ContextBridgeService:
             raise ValidationError("No text to import")
         if mode not in {"append", "replace"}:
             raise ValidationError("mode must be 'append' or 'replace'")
+        with span("import_text", package_name=name, engine=engine, mode=mode, chars=len(text)):
+            return self._import_text(
+                text,
+                name,
+                engine=engine,
+                origin=origin,
+                redact=redact,
+                redaction_kinds=redaction_kinds,
+                mode=mode,
+            )
 
+    def _import_text(
+        self,
+        text: str,
+        name: str,
+        *,
+        engine: str,
+        origin: str,
+        redact: bool | None,
+        redaction_kinds: list[str] | None,
+        mode: str,
+    ) -> ImportOutcome:
         notes: list[str] = []
         text, handoff = detect_handoff(text)
         if handoff is not None:
@@ -215,11 +237,15 @@ class ContextBridgeService:
             )
 
         label, adapter = self.resolve_engine(engine)
-        memory = self._extract_with(text, label, adapter, origin)
+        with span("extract", engine=label):
+            memory = self._extract_with(text, label, adapter, origin)
+            set_attribute("extracted", memory.total_items)
 
         do_redact = self.settings.redact_by_default if redact is None else redact
         policy = RedactionPolicy(enabled=do_redact, kinds=redaction_kinds)
-        memory, report = redact_memory(memory, policy)
+        with span("redact", enabled=do_redact):
+            memory, report = redact_memory(memory, policy)
+            set_attribute("redacted_values", report.total)
 
         transcript_tokens = parse_chat_transcript(text).total_tokens_estimate
         warnings: list[str] = []
@@ -260,6 +286,10 @@ class ContextBridgeService:
                 "holds. Review them with 'cb conflicts' or in the dashboard."
             )
         self._save(pkg)
+        set_attribute("added", added)
+        set_attribute("re_seen", re_seen)
+        set_attribute("conflicts", len(conflicts))
+        set_attribute("created", created)
 
         return ImportOutcome(
             package=pkg,
@@ -497,8 +527,34 @@ class ContextBridgeService:
         """Explainable retrieval over a stored package (lexical unless an adapter is given)."""
         pkg = self.get_package(name)
         return self.retrieve_from_memory(
-            pkg.memory, query, options, adapter=adapter, transcript_tokens=transcript_tokens
+            pkg.memory,
+            query,
+            options,
+            adapter=adapter,
+            transcript_tokens=transcript_tokens,
+            package_name=pkg.name,
         )
+
+    def vector_store_for(self, package_name: str | None, adapter: LLMInterface | None):
+        """Pick the vector store for a retrieval: pgvector when the backend is Postgres.
+
+        Vectors persisted in pgvector are keyed by package and embedding
+        model, so a package embedded once with OpenAI does not have to be
+        re-embedded on the next query.  Every other backend gets a fresh
+        in-memory FAISS / numpy store.
+        """
+        if package_name and getattr(self.store, "backend_name", "") == "postgres":
+            try:
+                from contextbridge.storage.postgres_store import PgVectorStore
+            except Exception:  # pragma: no cover - psycopg missing
+                return VectorStore()
+            model = (
+                getattr(adapter, "embedding_model", None) or getattr(adapter, "name", "default")
+                if adapter is not None
+                else "default"
+            )
+            return PgVectorStore(self.store, package_name, model=str(model))  # type: ignore[arg-type]
+        return VectorStore()
 
     def retrieve_from_memory(
         self,
@@ -508,17 +564,32 @@ class ContextBridgeService:
         *,
         adapter: LLMInterface | None = None,
         transcript_tokens: int | None = None,
+        package_name: str | None = None,
     ) -> RetrievalResult:
         options = options or RetrievalOptions()
-        if adapter is None:
-            retriever = MemoryRetriever()
-            retriever.index_sync(memory)
-            return retriever.retrieve_sync(query, options, transcript_tokens=transcript_tokens)
-        retriever = MemoryRetriever(VectorStore())
-        _run(retriever.index(memory, adapter))
-        return _run(
-            retriever.retrieve(query, adapter, options, transcript_tokens=transcript_tokens)
-        )
+        with span(
+            "retrieve",
+            package_name=package_name,
+            items=memory.total_items,
+            top_k=options.top_k,
+            semantic=adapter is not None,
+        ):
+            if adapter is None:
+                retriever = MemoryRetriever()
+                retriever.index_sync(memory)
+                result = retriever.retrieve_sync(
+                    query, options, transcript_tokens=transcript_tokens
+                )
+            else:
+                retriever = MemoryRetriever(self.vector_store_for(package_name, adapter))
+                _run(retriever.index(memory, adapter))
+                result = _run(
+                    retriever.retrieve(query, adapter, options, transcript_tokens=transcript_tokens)
+                )
+            set_attribute("selected", len(result.selected))
+            set_attribute("method", result.method)
+            set_attribute("tokens_selected", result.tokens_selected)
+            return result
 
     def build_prompt(
         self,
@@ -544,13 +615,46 @@ class ContextBridgeService:
         estimates, the withheld items, and (when a query was given) the
         retrieval result.
         """
+        with span(
+            "build_prompt",
+            package_name=name,
+            target_model=target_model,
+            surface=surface,
+            record=record,
+            narrowed=bool(query and query.strip()),
+        ):
+            return self._build_prompt(
+                name,
+                target_model,
+                query=query,
+                options=options,
+                extras=extras,
+                adapter=adapter,
+                surface=surface,
+                record=record,
+            )
+
+    def _build_prompt(
+        self,
+        name: str,
+        target_model: str,
+        *,
+        query: str | None,
+        options: RetrievalOptions | None,
+        extras: Iterable[tuple[str, str]],
+        adapter: LLMInterface | None,
+        surface: str,
+        record: bool,
+    ) -> dict[str, Any]:
         pkg = self.get_package(name)
         allowed, withheld = partition_for_target(pkg.memory, target_model)
         target_kind = classify_target(target_model)
 
         retrieval: RetrievalResult | None = None
         if query and query.strip():
-            retrieval = self.retrieve_from_memory(allowed, query, options, adapter=adapter)
+            retrieval = self.retrieve_from_memory(
+                allowed, query, options, adapter=adapter, package_name=pkg.name
+            )
             rendered = retrieval.to_memory()
             note = f"Selected by {retrieval.method} retrieval for: {query.strip()!r}"
         else:
@@ -573,6 +677,9 @@ class ContextBridgeService:
         full_block = self.builder.build(pkg, target_model, memory=allowed)
         included_ids = [i.id for i in rendered.all_items]
         tokens_prompt = estimate_tokens(prompt)
+        set_attribute("included", len(included_ids))
+        set_attribute("withheld", len(withheld))
+        set_attribute("tokens_prompt", tokens_prompt)
 
         egress: EgressRecord | None = None
         if record:
@@ -629,7 +736,11 @@ class ContextBridgeService:
         retrieval: RetrievalResult | None = None
         if smart and allowed.total_items > 0:
             retrieval = self.retrieve_from_memory(
-                allowed, question, RetrievalOptions(top_k=top_k), adapter=adapter
+                allowed,
+                question,
+                RetrievalOptions(top_k=top_k),
+                adapter=adapter,
+                package_name=pkg.name,
             )
             rendered = retrieval.to_memory()
         else:
@@ -707,13 +818,18 @@ class ContextBridgeService:
         if len(names) < 2:
             raise ValidationError("Merging needs at least two packages")
         target = validate_package_name(new_name)
-        packages = [self.get_package(n) for n in names]
-        if not dry_run and self.store.exists(target) and not overwrite:
-            raise ValidationError(f"Package '{target}' already exists")
-        merged, result = self.merger.merge_packages(packages, name=target, packager=self.packager)
-        if not dry_run:
-            self.store.save(merged)
-        return merged, result
+        with span("merge", package_name=target, sources=len(names), dry_run=dry_run):
+            packages = [self.get_package(n) for n in names]
+            if not dry_run and self.store.exists(target) and not overwrite:
+                raise ValidationError(f"Package '{target}' already exists")
+            merged, result = self.merger.merge_packages(
+                packages, name=target, packager=self.packager
+            )
+            if not dry_run:
+                self.store.save(merged)
+            set_attribute("duplicates", len(result.duplicates))
+            set_attribute("conflicts", len(result.conflicts))
+            return merged, result
 
     # -- Introspection -------------------------------------------------------
 

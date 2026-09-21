@@ -22,9 +22,13 @@ Sharing boundaries & lifecycle
 
 Privacy & quality
     cb scan          Show what the redactor would mask in a file
-    cb eval          Run the offline evaluation suite
+    cb eval          Run the offline evaluation suite (``--golden`` for the retrieval gate)
     cb info          Storage backend, location, and stats
-    cb migrate       Import legacy JSON packages into SQLite
+
+Serving & storage
+    cb serve         Run the FastAPI server (dashboard + JSON API + OpenAPI docs)
+    cb migrate       Import legacy JSON packages into SQLite, or copy SQLite → Postgres
+    cb db            Postgres schema status / upgrade
 
 Legacy aliases kept for compatibility: ``cb export`` and ``cb web-export``.
 """
@@ -173,10 +177,10 @@ def _read_inputs(paths: tuple[Path, ...]) -> tuple[str, str]:
 )
 @click.option(
     "--backend",
-    type=click.Choice(["sqlite", "json"], case_sensitive=False),
+    type=click.Choice(["sqlite", "postgres", "json"], case_sensitive=False),
     envvar="CB_STORAGE_BACKEND",
     default=None,
-    help="Storage backend (default sqlite).",
+    help="Storage backend (default sqlite; postgres needs CB_DATABASE_URL).",
 )
 @click.pass_context
 def main(ctx: click.Context, storage_dir: str | None, backend: str | None):
@@ -949,11 +953,52 @@ def scan(ctx: Context, files: tuple[Path, ...]):
 @main.command(name="eval")
 @click.option("--json", "as_json", is_flag=True, help="Print the full report as JSON.")
 @click.option("--top-k", default=3, show_default=True, type=click.IntRange(1, 20))
-def eval_cmd(as_json: bool, top_k: int):
+@click.option("--golden", is_flag=True, help="Run the golden retrieval harness instead.")
+@click.option(
+    "--check-baseline",
+    is_flag=True,
+    help="With --golden: exit 1 when a guarded metric regressed against the baseline.",
+)
+@click.option(
+    "--baseline",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Baseline JSON to compare against (default: the bundled golden_baseline.json).",
+)
+@click.option(
+    "--update-baseline",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="With --golden: write the current aggregate as a new baseline file.",
+)
+@click.option("--tolerance", default=0.02, show_default=True, type=click.FloatRange(0, 1))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Also write the full JSON report to this file (for CI artifacts).",
+)
+def eval_cmd(
+    as_json: bool,
+    top_k: int,
+    golden: bool,
+    check_baseline: bool,
+    baseline: Path | None,
+    update_baseline: Path | None,
+    tolerance: float,
+    output: Path | None,
+):
     """Run the offline evaluation suite (fixtures only, no API calls)."""
+    if golden:
+        _eval_golden(as_json, top_k, check_baseline, baseline, update_baseline, tolerance, output)
+        return
     from contextbridge.evaluation import run_evaluation
 
     report = run_evaluation(top_k=top_k)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     if as_json:
         click.echo(report.model_dump_json(indent=2))
         return
@@ -984,6 +1029,109 @@ def eval_cmd(as_json: bool, top_k: int):
     console.print("[dim]Use --json for per-query and per-fixture detail.[/]")
 
 
+def _eval_golden(
+    as_json: bool,
+    top_k: int,
+    check_baseline: bool,
+    baseline: Path | None,
+    update_baseline: Path | None,
+    tolerance: float,
+    output: Path | None,
+) -> None:
+    import json
+
+    from contextbridge.evaluation.golden import (
+        baseline_from_report,
+        compare_to_baseline,
+        load_baseline,
+        run_golden,
+    )
+
+    report = run_golden(top_k=top_k)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    if update_baseline is not None:
+        update_baseline.parent.mkdir(parents=True, exist_ok=True)
+        update_baseline.write_text(
+            json.dumps(baseline_from_report(report), indent=2) + "\n", encoding="utf-8"
+        )
+        console.print(f"[green]✓[/] Baseline written to {update_baseline}")
+    if as_json:
+        click.echo(report.model_dump_json(indent=2))
+    else:
+        table = Table(
+            title=f"Golden retrieval harness — {report.pairs} pairs, top_k={top_k}",
+            border_style="cyan",
+        )
+        table.add_column("Slice", style="bold")
+        table.add_column("Pairs", justify="right")
+        table.add_column("Hit@1", justify="right")
+        table.add_column(f"P@{top_k}", justify="right")
+        table.add_column(f"R@{top_k}", justify="right")
+        table.add_column("MRR", justify="right")
+        table.add_column(f"nDCG@{top_k}", justify="right")
+
+        def row(label: str, m: dict, n: int) -> None:
+            table.add_row(
+                label,
+                str(n),
+                f"{m['hit_at_1']:.1%}",
+                f"{m['precision_at_k']:.1%}",
+                f"{m['recall_at_k']:.1%}",
+                f"{m['mrr']:.1%}",
+                f"{m['ndcg_at_k']:.1%}",
+            )
+
+        row("all", report.aggregate, report.pairs)
+        for tag, m in report.by_tag.items():
+            row(tag, m, int(m.get("pairs", 0)))
+        console.print(table)
+        misses = report.failures()
+        if misses:
+            console.print(f"[dim]{len(misses)} query(ies) found nothing relevant in the top-k:[/]")
+            for f in misses[:12]:
+                console.print(f"[dim]  • {f.id} ({', '.join(f.tags)}): {f.query}[/]")
+        for note in report.notes:
+            console.print(f"[dim]• {note}[/]")
+
+    if check_baseline:
+        base = load_baseline(baseline)
+        if base is None:
+            _fail("No baseline found to compare against")
+        regressions = compare_to_baseline(report, base, tolerance=tolerance)
+        if regressions:
+            console.print(f"[red]✗ {len(regressions)} metric(s) regressed beyond {tolerance}:[/]")
+            for r in regressions:
+                console.print(
+                    f"  {r['metric']}: baseline {r['baseline']:.4f} → now {r['current']:.4f} "
+                    f"({r['delta']:+.4f})"
+                )
+            sys.exit(1)
+        console.print(
+            f"[green]✓[/] No regression against the baseline "
+            f"(tolerance {tolerance}, {report.pairs} pairs)."
+        )
+
+
+@main.command()
+@click.option("--host", default=None, help="Bind address (default: CB_HOST or 127.0.0.1).")
+@click.option("--port", default=None, type=int, help="Port (default: CB_PORT or 5000).")
+@click.option("--reload", is_flag=True, help="Auto-reload on code changes (development).")
+def serve(host: str | None, port: int | None, reload: bool):
+    """Run the FastAPI server: dashboard, JSON API, OpenAPI docs at /docs."""
+    try:
+        from contextbridge.api.app import run as run_server
+    except ImportError:  # pragma: no cover - optional dependency missing
+        _fail("The API server needs the 'api' extra: pip install 'contextbridge[api]'")
+    settings = Settings.from_env()
+    console.print(
+        f"[bold]ContextBridge API[/] → http://{host or settings.host}:{port or settings.port} "
+        f"[dim](docs at /docs · backend {settings.storage_backend})[/]"
+    )
+    run_server(host=host, port=port, reload=reload)
+
+
 @main.command()
 @pass_ctx
 def info(ctx: Context):
@@ -997,9 +1145,17 @@ def info(ctx: Context):
         f"Default engine: {settings.default_adapter}",
         f"Packages: {len(store.list_packages())}",
     ]
-    if isinstance(store, SQLiteStore):
-        st = store.stats()
-        lines.append(f"Stored versions: {st['versions']} · DB size: {st['bytes']:,} bytes")
+    stats = getattr(store, "stats", None)
+    if callable(stats):
+        st = stats()
+        lines.append(
+            f"Stored versions: {st.get('versions', 0)} · size: {st.get('bytes', 0):,} bytes"
+        )
+        if "embeddings" in st:
+            lines.append(
+                f"Schema version: {st.get('schema_version')} · pgvector {st.get('pgvector')} · "
+                f"embeddings stored: {st['embeddings']}"
+            )
     console.print(Panel("\n".join(lines), title="ContextBridge", border_style="cyan"))
 
 
@@ -1010,9 +1166,72 @@ def info(ctx: Context):
     default=None,
     help="Directory with legacy JSON packages (default: the storage directory).",
 )
+@click.option(
+    "--to",
+    "target",
+    type=click.Choice(["sqlite", "postgres"], case_sensitive=False),
+    default="sqlite",
+    show_default=True,
+    help="sqlite: import legacy JSON. postgres: copy the SQLite store to PostgreSQL.",
+)
+@click.option(
+    "--database-url",
+    default=None,
+    help="PostgreSQL DSN for --to postgres (default: CB_DATABASE_URL).",
+)
+@click.option(
+    "--overwrite", is_flag=True, help="Replace packages that already exist in the target."
+)
+@click.option("--only", "names", multiple=True, help="Copy only these packages (repeatable).")
 @pass_ctx
-def migrate(ctx: Context, from_dir: Path | None):
-    """Import legacy JSON packages into the SQLite store (JSON files are kept)."""
+def migrate(
+    ctx: Context,
+    from_dir: Path | None,
+    target: str,
+    database_url: str | None,
+    overwrite: bool,
+    names: tuple[str, ...],
+):
+    """Move data between backends without deleting anything.
+
+    ``cb migrate`` imports legacy JSON packages into SQLite.  ``cb migrate --to
+    postgres`` copies every package (all versions plus the egress ledger) from
+    the local SQLite store into PostgreSQL, so a deployment can start from
+    your existing memory.
+    """
+    if target.lower() == "postgres":
+        from contextbridge.storage import copy_store
+
+        dsn = database_url or ctx.settings.database_url
+        if not dsn:
+            _fail("Give --database-url or set CB_DATABASE_URL")
+        source = ctx.service.store
+        if source.backend_name == "postgres":
+            _fail("The source is already Postgres; run with --backend sqlite")
+        try:
+            pg = get_store("postgres", settings=ctx.settings, database_url=dsn)
+        except Exception as exc:
+            _fail(f"Could not open PostgreSQL: {exc.__class__.__name__}: {exc}")
+        try:
+            report = copy_store(source, pg, overwrite=overwrite, names=list(names) or None)
+        finally:
+            pg.close()
+        if report["copied"]:
+            console.print(
+                f"[green]✓[/] Copied {len(report['copied'])} package(s): "
+                + ", ".join(report["copied"])
+            )
+        if report["skipped"]:
+            console.print(
+                f"[dim]Already in Postgres (use --overwrite): {', '.join(report['skipped'])}[/]"
+            )
+        if report["failed"]:
+            _fail(f"Failed: {', '.join(report['failed'])}")
+        if not (report["copied"] or report["skipped"]):
+            console.print("[dim]No packages to copy.[/]")
+        console.print("[dim]The SQLite store is untouched.[/]")
+        return
+
     store = ctx.service.store
     if not isinstance(store, SQLiteStore):
         _fail("Migration targets the SQLite backend; run without --backend json")
@@ -1027,6 +1246,65 @@ def migrate(ctx: Context, from_dir: Path | None):
     if not legacy_names:
         console.print(f"[dim]No legacy JSON packages found in {source_dir}.[/]")
     console.print("[dim]JSON files are left in place; remove them yourself once you are happy.[/]")
+
+
+@main.group()
+def db():
+    """PostgreSQL schema management (pgvector backend)."""
+
+
+def _open_pg(ctx: Context, database_url: str | None):
+    dsn = database_url or ctx.settings.database_url
+    if not dsn:
+        _fail("Give --database-url or set CB_DATABASE_URL")
+    try:
+        return get_store("postgres", settings=ctx.settings, database_url=dsn, auto_migrate=False)
+    except Exception as exc:
+        _fail(f"Could not open PostgreSQL: {exc.__class__.__name__}: {exc}")
+
+
+@db.command(name="status")
+@click.option("--database-url", default=None, help="PostgreSQL DSN (default: CB_DATABASE_URL).")
+@pass_ctx
+def db_status(ctx: Context, database_url: str | None):
+    """Show the applied schema version and pending migrations."""
+    store = _open_pg(ctx, database_url)
+    try:
+        status = store.schema_status()
+        st = store.stats() if status["schema_version"] >= 2 else None
+    finally:
+        store.close()
+    lines = [
+        f"Location: {status['location']}",
+        f"Schema version: {status['schema_version']} (latest {status['latest']})",
+        f"Pending migrations: {status['pending']}",
+        f"pgvector: {status['pgvector_installed'] or 'not installed'}"
+        + ("" if status["pgvector_available"] else " [red](extension not available!)[/]"),
+    ]
+    if st is not None:
+        lines.append(
+            f"Packages: {st['packages']} · versions: {st['versions']} · "
+            f"embeddings: {st['embeddings']} · ledger events: {st['egress_events']}"
+        )
+    console.print(Panel("\n".join(lines), title="PostgreSQL", border_style="cyan"))
+    if status["pending"] > 0:
+        console.print("[yellow]Run 'cb db upgrade' to apply pending migrations.[/]")
+
+
+@db.command(name="upgrade")
+@click.option("--database-url", default=None, help="PostgreSQL DSN (default: CB_DATABASE_URL).")
+@pass_ctx
+def db_upgrade(ctx: Context, database_url: str | None):
+    """Apply pending schema migrations."""
+    store = _open_pg(ctx, database_url)
+    try:
+        ran = store.migrate()
+    finally:
+        store.close()
+    if ran:
+        console.print(f"[green]✓[/] Applied {len(ran)} migration(s): {', '.join(ran)}")
+    else:
+        console.print("[green]✓[/] Schema is up to date.")
 
 
 # ---------------------------------------------------------------------------
