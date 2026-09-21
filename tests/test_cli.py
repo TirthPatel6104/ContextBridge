@@ -7,6 +7,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
+from contextbridge import __version__
 from contextbridge.cli import main
 from tests.conftest import SAMPLE_CHAT, SAMPLE_CHAT_WITH_SECRETS
 
@@ -28,7 +29,7 @@ class TestBasics:
     def test_version(self):
         result = _run("--version")
         assert result.exit_code == 0
-        assert "0.3.0" in result.output
+        assert __version__ in result.output
 
     def test_list_empty(self, env):
         result = _run("list")
