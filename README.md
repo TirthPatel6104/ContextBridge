@@ -249,7 +249,17 @@ The `semantic` slice is expected to fail under lexical retrieval; it exists to m
 `benchmarks/bench.py` measures SQLite vs Postgres on the package path and FAISS / numpy vs pgvector (exact and HNSW, with recall against exact search) at 1k–50k vectors, plus what persisted embeddings save on a hybrid query. The CI *Benchmarks* job runs it on a GitHub `ubuntu-latest` runner so the published numbers name their hardware; the tables and their interpretation are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 <!-- BENCH:START -->
-_The summary table is refreshed from `benchmarks/results/github-runner.md` after each release's CI run._
+Highlights from the GitHub `ubuntu-latest` run (2026-09-21, 4 vCPU, pgvector 0.8.6):
+
+| Measurement | SQLite / in-memory | PostgreSQL / pgvector |
+|---|---|---|
+| Save + load a 100-item package (median) | 1.159 ms | 3.635 ms |
+| List 200 packages (median) | 0.385 ms | 2.023 ms |
+| Top-10 over 50k × 384-d vectors, hierarchical corpus (median · recall@10) | FAISS flat 4.575 ms · 1.000 | HNSW 1.871 ms · 0.992 (exact scan 22.68 ms) |
+| Same, uniformly random corpus (worst case for graph indexes) | FAISS flat 4.663 ms · 1.000 | HNSW 32.753 ms · 1.000 (exact scan 35.268 ms) |
+| Second hybrid query, 200 items, 50 ms simulated embedding call | 118.6 ms (re-embeds every item) | 61.0 ms (embeds only the query) |
+
+SQLite stays the default for a single process; Postgres + pgvector is for shared deployments, where persisted embeddings halve the cost of a hybrid query and the HNSW index keeps large packages fast when the embeddings have real structure.
 <!-- BENCH:END -->
 
 ## Observability
