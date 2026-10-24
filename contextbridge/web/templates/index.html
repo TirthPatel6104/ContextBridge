@@ -25,6 +25,12 @@
       <div><dt>Redaction</dt><dd id="status-redaction">…</dd></div>
       <div><dt>Data</dt><dd>stays on this machine</dd></div>
     </dl>
+    <form id="api-key-field" class="api-key-field" hidden autocomplete="off">
+      <label for="api-key">This server requires an API key</label>
+      <input id="api-key" type="password" placeholder="X-API-Key" aria-describedby="api-key-help">
+      <button type="button" id="api-key-save" class="secondary">Use key</button>
+      <small id="api-key-help">Stored only in this browser (localStorage).</small>
+    </form>
   </header>
 
   <nav class="stepper" aria-label="Workflow">
@@ -33,6 +39,7 @@
       <li><a href="#review"><span class="step-num">2</span> Review &amp; redact</a></li>
       <li><a href="#retrieve"><span class="step-num">3</span> Retrieve &amp; preview</a></li>
       <li><a href="#export"><span class="step-num">4</span> Export to a model</a></li>
+      <li><a href="#trust"><span class="step-num">✓</span> Ledger &amp; health</a></li>
     </ol>
   </nav>
 
@@ -100,6 +107,7 @@
         <h3>Extraction complete</h3>
         <p id="import-summary" class="summary-line"></p>
         <ul id="import-warnings" class="warning-list" hidden></ul>
+        <ul id="import-notes" class="note-list" hidden></ul>
         <div id="import-redaction" class="redaction-report" hidden></div>
         <p class="help">Continue to <a href="#review">step 2</a> to review every item, or <a href="#retrieve">step 3</a> to preview retrieval.</p>
       </div>
@@ -109,7 +117,7 @@
     <section class="card" id="review" aria-labelledby="review-title">
       <header class="card-header">
         <h2 id="review-title"><span class="step-badge" aria-hidden="true">2</span> Review extracted memory</h2>
-        <p class="subtitle">Every item shows its category, confidence, source excerpt, and where it came from. Remove anything wrong — removals create a new version you can roll back.</p>
+        <p class="subtitle">Every item shows its category, confidence, source excerpt, where it came from, how often it has been seen, and who may see it. Remove, restrict, or retire anything — every change is a new version you can roll back.</p>
       </header>
 
       <div class="toolbar">
@@ -131,12 +139,33 @@
 
       <div id="review-body" hidden>
         <p id="review-meta" class="summary-line"></p>
+
+        <div id="conflict-panel" class="conflict-panel" hidden>
+          <h3>⚠ New statements that may contradict stored memory</h3>
+          <p class="help">A later import said something similar but different. Decide which stands; the other is kept as <em>superseded</em>, never deleted. "Both stand" dismisses the flag.</p>
+          <ul id="conflict-list" class="conflict-list"></ul>
+        </div>
+
+        <div class="review-actions" role="group" aria-label="Actions on selected items">
+          <span class="muted small">With selected items:</span>
+          <label for="sharing-policy">Sharing</label>
+          <select id="sharing-policy" aria-describedby="sharing-help">
+            <option value="any">any target</option>
+            <option value="local_only">local models only</option>
+            <option value="never">never in a prompt</option>
+          </select>
+          <button type="button" class="btn btn-ghost btn-sm" id="apply-sharing-btn" disabled>Apply sharing</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="mark-done-btn" disabled>Mark done</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="reopen-btn" disabled>Reactivate</button>
+          <span id="sharing-help" class="help" style="flex-basis:100%;margin:0">"Local models only" items are withheld from ChatGPT and Claude but rendered for Ollama. Withheld items are always listed when a prompt is built.</span>
+        </div>
+
         <div id="memory-groups" class="memory-groups"></div>
 
         <details class="history">
           <summary>Version history</summary>
           <table class="table" id="history-table" aria-label="Version history">
-            <thead><tr><th scope="col">Version</th><th scope="col">When</th><th scope="col">Source</th><th scope="col">Note</th><th scope="col">Added</th><th scope="col">Removed</th><th scope="col"></th></tr></thead>
+            <thead><tr><th scope="col">Version</th><th scope="col">When</th><th scope="col">Source</th><th scope="col">Note</th><th scope="col">Added</th><th scope="col">Removed</th><th scope="col">Changed</th><th scope="col"></th></tr></thead>
             <tbody></tbody>
           </table>
         </details>
@@ -218,6 +247,10 @@
           <input type="checkbox" id="include-files" name="include_files">
           <span>Include files attached to this package <span class="muted">(off by default — full file contents go into the prompt)</span></span>
         </label>
+        <label class="check span-2">
+          <input type="checkbox" id="record-egress" name="record" checked>
+          <span>Record this in the egress ledger <span class="muted">(which item ids went to which model; untick to preview only)</span></span>
+        </label>
         <div class="form-actions span-2">
           <button type="submit" class="btn btn-primary" id="prompt-btn">Generate prompt</button>
           <button type="button" class="btn btn-ghost" id="copy-btn" disabled>Copy to clipboard</button>
@@ -227,9 +260,10 @@
       <p id="prompt-error" class="inline-error" role="alert" hidden></p>
       <div id="prompt-result" hidden>
         <p id="prompt-meta" class="summary-line"></p>
+        <div id="prompt-withheld" class="withheld-panel" hidden></div>
         <label for="prompt-output" class="visually-hidden">Generated prompt</label>
         <textarea id="prompt-output" class="prompt-box" readonly rows="14" spellcheck="false"></textarea>
-        <p class="help">Paste it as your first message in the target chat, then continue working.</p>
+        <p class="help">Paste it as your first message in the target chat, then continue working. When you later import that chat, ContextBridge recognises the hand-off and skips the pasted block.</p>
       </div>
 
       <hr class="divider">
@@ -274,6 +308,39 @@
             <button type="button" class="btn btn-ghost" id="delete-no">Cancel</button>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ================= TRUST & HEALTH ================= -->
+    <section class="card" id="trust" aria-labelledby="trust-title">
+      <header class="card-header">
+        <h2 id="trust-title">Where has this memory gone, and is it still true?</h2>
+        <p class="subtitle">The egress ledger records every prompt built from the selected package: which item ids, which model, when. The health report flags stale items, open tasks, and unresolved conflicts.</p>
+      </header>
+
+      <div class="toolbar-actions">
+        <button type="button" class="btn btn-ghost" id="trust-refresh-btn" disabled>Refresh</button>
+        <label for="stale-days" class="muted small">Stale after</label>
+        <input type="number" id="stale-days" min="0" max="3650" value="30" style="width:5rem"> <span class="muted small">days</span>
+        <button type="button" class="btn btn-danger-ghost" id="clear-ledger-btn" disabled>Clear ledger</button>
+      </div>
+      <p id="trust-error" class="inline-error" role="alert" hidden></p>
+      <p id="trust-empty" class="empty-state">Select a package in step 2 to see its ledger and health.</p>
+
+      <div id="trust-body" hidden>
+        <dl class="ledger-summary" id="ledger-summary" aria-label="Exposure summary"></dl>
+        <div class="table-wrap">
+          <table class="table" id="ledger-table" aria-label="Egress ledger">
+            <thead><tr><th scope="col">#</th><th scope="col">When</th><th scope="col">Target</th><th scope="col">Kind</th><th scope="col">Via</th><th scope="col">Items</th><th scope="col">Withheld</th><th scope="col">Query</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p id="ledger-empty" class="help" hidden>No prompts have been built for this package yet.</p>
+        <details id="cloud-items" hidden>
+          <summary>Items that have been sent to a cloud model</summary>
+          <ul id="cloud-items-list" class="notes"></ul>
+        </details>
+        <div class="health-lists" id="health-lists"></div>
       </div>
     </section>
 

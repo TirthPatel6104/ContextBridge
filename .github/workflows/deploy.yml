@@ -1,0 +1,87 @@
+name: Deploy to AWS
+
+# Builds the production image, pushes it to Amazon ECR, and rolls it out to the
+# App Runner service that ``infra/aws`` provisions.  Authentication uses GitHub's
+# OIDC provider (no long-lived AWS keys in the repository).
+#
+# Required repository configuration (see docs/DEPLOYMENT.md):
+#   variables:  AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_REPOSITORY, APP_RUNNER_SERVICE_ARN
+#
+# Runs on pushes to main (after CI) and on version tags; can also be started by hand.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build, push, roll out
+    runs-on: ubuntu-latest
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    environment:
+      name: production
+      url: ${{ steps.rollout.outputs.url }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Roll out to App Runner
+        id: rollout
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}"
+          aws apprunner update-service \
+            --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" \
+            --source-configuration "{\"ImageRepository\":{\"ImageIdentifier\":\"$IMAGE\",\"ImageRepositoryType\":\"ECR\",\"ImageConfiguration\":{\"Port\":\"8000\"}},\"AutoDeploymentsEnabled\":false}" \
+            >/dev/null
+          echo "Waiting for the service to become RUNNING…"
+          for i in $(seq 1 60); do
+            STATUS=$(aws apprunner describe-service --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" --query 'Service.Status' --output text)
+            echo "  $STATUS"
+            [ "$STATUS" = "RUNNING" ] && break
+            [ "$STATUS" = "CREATE_FAILED" ] || [ "$STATUS" = "DELETE_FAILED" ] && exit 1
+            sleep 10
+          done
+          URL="https://$(aws apprunner describe-service --service-arn "${{ vars.APP_RUNNER_SERVICE_ARN }}" --query 'Service.ServiceUrl' --output text)"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test the live service
+        run: |
+          pip install httpx
+          python scripts/e2e.py --base-url "${{ steps.rollout.outputs.url }}" --api-key "${{ secrets.CB_API_KEY }}"

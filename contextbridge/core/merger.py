@@ -220,7 +220,47 @@ class PackageMerger:
         )
         return merged_pkg, result
 
+    def cross_conflicts(
+        self, stored: StructuredMemory, incoming: StructuredMemory
+    ) -> list[Conflict]:
+        """Possible conflicts between *stored* and *incoming* items only.
+
+        Pairs inside one side are not compared (they were reviewed already or
+        arrive together), which makes this suitable for "does this import
+        contradict what I already know?" checks.  ``Conflict.a`` is always the
+        stored item and ``Conflict.b`` the incoming one.
+        """
+        conflicts: list[Conflict] = []
+        for cat in _CONFLICT_CATEGORIES:
+            for a in stored.get_category(cat):
+                for b in incoming.get_category(cat):
+                    if a.id == b.id:
+                        continue
+                    conflict = self._conflict_pair(cat, a, b)
+                    if conflict is not None:
+                        conflicts.append(conflict)
+        return conflicts
+
     # -- Internals -----------------------------------------------------------
+
+    def _conflict_pair(
+        self, category: MemoryCategory, a: MemoryItem, b: MemoryItem
+    ) -> Conflict | None:
+        sim = similarity(a.content, b.content)
+        if sim < self.conflict_threshold or sim >= self.duplicate_threshold:
+            return None
+        shared = shared_terms(a.content, b.content)
+        if len(shared) < 2:
+            return None
+        reason = "Similar statements with different wording"
+        la, lb = a.content.lower(), b.content.lower()
+        if any(m in la for m in _NEGATION_MARKERS) != any(m in lb for m in _NEGATION_MARKERS):
+            reason = "One statement negates or supersedes the other"
+        elif a.origin != b.origin:
+            reason = "Different conversations describe the same subject differently"
+        return Conflict(
+            category=category, a=a, b=b, similarity=sim, shared_terms=shared[:8], reason=reason
+        )
 
     def _dedupe(self, pool: list[MemoryItem]) -> tuple[list[MemoryItem], list[DuplicateGroup]]:
         """Greedy clustering: each item joins the first kept item it resembles."""
@@ -268,31 +308,9 @@ class PackageMerger:
         conflicts: list[Conflict] = []
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
-                a, b = items[i], items[j]
-                sim = similarity(a.content, b.content)
-                if sim < self.conflict_threshold:
-                    continue
-                shared = shared_terms(a.content, b.content)
-                if len(shared) < 2:
-                    continue
-                reason = "Similar statements with different wording"
-                la, lb = a.content.lower(), b.content.lower()
-                if any(m in la for m in _NEGATION_MARKERS) != any(
-                    m in lb for m in _NEGATION_MARKERS
-                ):
-                    reason = "One statement negates or supersedes the other"
-                elif a.origin != b.origin:
-                    reason = "Different conversations describe the same subject differently"
-                conflicts.append(
-                    Conflict(
-                        category=category,
-                        a=a,
-                        b=b,
-                        similarity=sim,
-                        shared_terms=shared[:8],
-                        reason=reason,
-                    )
-                )
+                conflict = self._conflict_pair(category, items[i], items[j])
+                if conflict is not None:
+                    conflicts.append(conflict)
         return conflicts
 
 

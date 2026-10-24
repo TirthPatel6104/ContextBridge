@@ -4,23 +4,183 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
-  test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check contextbridge tests benchmarks scripts
+      - run: ruff format --check contextbridge tests benchmarks scripts
+
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cb
+          POSTGRES_PASSWORD: cb
+          POSTGRES_DB: cb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cb -d cb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      CB_TEST_DATABASE_URL: postgresql://cb:cb@localhost:5432/cb
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -e ".[dev,web]"
-      - run: ruff check contextbridge tests
-      - run: ruff format --check contextbridge tests
-      - run: pytest -q
-      - name: Offline evaluation (no API calls)
-        run: python -m contextbridge.cli eval
+      - run: pip install -e ".[dev]"
+      - name: Unit + integration tests with coverage gate (80%)
+        run: >-
+          pytest -q
+          --cov=contextbridge
+          --cov-report=term-missing:skip-covered
+          --cov-report=xml:coverage.xml
+          --cov-fail-under=80
+      - uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  eval:
+    name: Evaluation harness
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Offline component suite (no API calls)
+        run: python -m contextbridge.cli eval --output reports/eval.json
+      - name: Golden retrieval harness (84 pairs) with regression gate
+        run: >-
+          python -m contextbridge.cli eval --golden --check-baseline
+          --tolerance 0.02 --output reports/golden.json
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          g = json.loads(pathlib.Path("reports/golden.json").read_text())
+          e = json.loads(pathlib.Path("reports/eval.json").read_text())
+          print("## Golden retrieval harness\n")
+          print(f"{g['pairs']} pairs, top_k={g['top_k']}, method={g['method']}\n")
+          print("| Slice | Pairs | Hit@1 | P@k | R@k | MRR | nDCG@k |\n|---|---|---|---|---|---|---|")
+          rows = [("all", {**g["aggregate"], "pairs": g["pairs"]})] + sorted(g["by_tag"].items())
+          for name, m in rows:
+              print(f"| {name} | {int(m['pairs'])} | {m['hit_at_1']:.1%} | {m['precision_at_k']:.1%} | {m['recall_at_k']:.1%} | {m['mrr']:.1%} | {m['ndcg_at_k']:.1%} |")
+          print("\n## Offline component suite\n")
+          print("| Metric | Value |\n|---|---|")
+          for k, v in e["aggregate"].items():
+              print(f"| {k} | {v:.4f} |")
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluation-reports
+          path: reports/
+
+  bench:
+    name: Benchmarks (published numbers)
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: cb
+          POSTGRES_PASSWORD: cb
+          POSTGRES_DB: cb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cb -d cb"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Benchmarks, hierarchical corpus (typical embeddings)
+        run: >-
+          python benchmarks/bench.py
+          --database-url postgresql://cb:cb@localhost:5432/cb
+          --sizes 1000,10000,50000 --dimension 384 --queries 200 --repeat 50
+          --corpus hierarchical
+          --output benchmarks/results/github-runner.json
+          --markdown benchmarks/results/github-runner.md
+      - name: Benchmarks, random corpus (adversarial lower bound for HNSW)
+        run: >-
+          python benchmarks/bench.py
+          --database-url postgresql://cb:cb@localhost:5432/cb
+          --sizes 1000,10000,50000 --dimension 384 --queries 200 --repeat 50
+          --corpus random
+          --output benchmarks/results/github-runner-random.json
+          --markdown benchmarks/results/github-runner-random.md
+      - run: |
+          cat benchmarks/results/github-runner.md >> "$GITHUB_STEP_SUMMARY"
+          cat benchmarks/results/github-runner-random.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/results/
+
+  docker:
+    name: Docker image + smoke test
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: contextbridge:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: "End-to-end smoke test (compose: app + pgvector)"
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait
+          pip install httpx
+          python scripts/e2e.py --base-url http://localhost:8000
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml logs app | tail -50
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v

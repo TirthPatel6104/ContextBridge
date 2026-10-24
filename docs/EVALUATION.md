@@ -1,18 +1,50 @@
 # Evaluation
 
-ContextBridge ships a small, reproducible evaluation suite so that claims about
-the offline components are measured, not asserted. It runs in about a second,
-uses only bundled fixtures, and makes **no API calls**.
+ContextBridge ships two reproducible, offline evaluation harnesses so that
+claims about the retrieval and extraction components are measured, not
+asserted. Both run in a few seconds, use only bundled fixtures, make **no API
+calls**, and run in CI on every push and pull request.
 
-```bash
-cb eval            # summary table
-cb eval --json     # per-fixture and per-query detail
-curl http://127.0.0.1:5000/api/eval   # same report from the dashboard server
-```
+| Harness | Command | What it covers | CI behaviour |
+|---|---|---|---|
+| **Component suite** | `cb eval` | Rule-based extraction coverage, retrieval on three labelled transcripts, duplicate detection, redaction, token savings | Report uploaded as an artifact; floors asserted by `tests/test_evaluation.py` |
+| **Golden retrieval harness** | `cb eval --golden` | 84 hand-written query → relevant-item pairs over six persona memory sets, tagged by difficulty | `--check-baseline` fails the build when a guarded metric drops more than 0.02 below the published baseline |
 
-CI runs it on every push.
+Both are also served by the API (`GET /api/v1/eval`, `GET /api/v1/eval/golden`) and shown in the dashboard's evaluation panel.
 
-## What is measured
+## Golden retrieval harness
+
+`contextbridge/evaluation/fixtures/golden_pairs.json` holds six synthetic memory sets of twelve items each (a fintech backend engineer, a PhD student, a product manager, a home renovation, a data-platform lead, a job search) and 84 queries. Every query lists the item indices a good retriever must surface and one or more tags:
+
+| Tag | Meaning | Pairs |
+|---|---|---|
+| `lexical` | The query shares clear vocabulary with the relevant item | 46 |
+| `paraphrase` | Reworded; some stems still overlap ("evaluation metrics" vs "Evaluate with chrF and COMET") | 28 |
+| `semantic` | No meaningful vocabulary overlap ("how much can we spend" → "Total budget is £28,000") | 10 |
+| `multi` | More than one item is relevant | 7 |
+
+Metrics per pair: Hit@1, Precision@k, Recall@k, reciprocal rank, nDCG@k (k = 3 by default). The report aggregates them overall and per tag.
+
+### Published baseline (v0.4.0, lexical BM25, k = 3)
+
+| Slice | Pairs | Hit@1 | P@3 | R@3 | MRR | nDCG@3 |
+|---|---|---|---|---|---|---|
+| **all** | 84 | 77.4% | 30.6% | 84.1% | 82.1% | 81.5% |
+| lexical | 46 | 100.0% | 34.1% | 98.9% | 100.0% | 99.2% |
+| paraphrase | 28 | 57.1% | 32.1% | 79.2% | 71.4% | 71.0% |
+| multi | 7 | 71.4% | 52.4% | 66.7% | 85.7% | 67.1% |
+| semantic | 10 | 30.0% | 10.0% | 30.0% | 30.0% | 30.0% |
+
+The baseline lives in `contextbridge/evaluation/fixtures/golden_baseline.json`. `cb eval --golden --check-baseline` compares the five guarded aggregate metrics against it with a tolerance of 0.02 and exits non-zero on a regression, which is what the CI job does. When retrieval legitimately improves, regenerate it with `cb eval --golden --update-baseline contextbridge/evaluation/fixtures/golden_baseline.json` and commit the change with the code that earned it.
+
+How to read it:
+
+* **Lexical pairs are at 100% Hit@1.** That is the floor a BM25 retriever must keep; a stemming or stop-word regression shows up here first.
+* **Paraphrase is where the conservative stemmer costs recall.** "relocate" does not match "relocating", "plan" does not match "planning". Loosening the stemmer trades these for false matches; the harness makes that trade measurable rather than a matter of taste.
+* **Semantic pairs are expected to fail under lexical retrieval.** They are in the set to quantify the headroom that real embeddings buy. `run_golden(adapter=…)` scores the hybrid path with any adapter that has semantic embeddings, and `tests/test_golden.py` runs it with the mock adapter to keep the code path covered. Publishing hybrid numbers requires a real embedding model and is left for a run with `OPENAI_API_KEY` or an Ollama embedding model set.
+* **Precision@3 is low by construction** for single-answer queries: at most one of three slots can be right. Compare P@k across runs, not against 1.0.
+
+## Component suite
 
 | Section | Component under test | Metric | How |
 |---|---|---|---|
@@ -22,16 +54,9 @@ CI runs it on every push.
 | Redaction | `redaction.scan_text` | Recall per kind; false positives | 17 samples with planted secrets/PII, 10 clean samples with version numbers, dates, ports, etc. |
 | Tokens | `core.tokens` + retriever | Savings vs. transcript and vs. full memory | Estimated tokens of the transcript, of the whole gold memory, and of the top-3 selection averaged over the fixture's queries |
 
-Fixtures live in `contextbridge/evaluation/fixtures/`:
+Fixtures live in `contextbridge/evaluation/fixtures/`: `backend_migration.json`, `thesis_research.json`, `product_launch.json` (7 gold items and 5 queries each), `duplicates.json`, `redaction.json`. All content is synthetic.
 
-* `backend_migration.json` — a developer planning a Flask → FastAPI/PostgreSQL migration
-* `thesis_research.json` — a PhD student planning low-resource MT experiments
-* `product_launch.json` — a product manager preparing a pricing launch
-* `duplicates.json`, `redaction.json`
-
-Each transcript fixture has 7 gold items across the six categories and 5 retrieval queries with their relevant gold indices. All content is synthetic.
-
-## Current results (v0.2.0)
+### Current results (v0.4.0)
 
 | Metric | Value |
 |---|---|
@@ -46,37 +71,23 @@ Each transcript fixture has 7 gold items across the six categories and 5 retriev
 | Token savings vs. transcript | 93.2% |
 | Token savings vs. full memory | 81.5% |
 
-Per-fixture token figures (estimates):
-
-| Fixture | Transcript | Full memory | Mean top-3 selection |
-|---|---|---|---|
-| backend_migration | 289 | 94 | 21 |
-| thesis_research | 263 | 96 | 15 |
-| product_launch | 241 | 103 | 17 |
-
-## How to read these numbers honestly
+### How to read these numbers honestly
 
 * **Extraction coverage is 100% because the fixtures are written the way the rule-based extractor expects** ("I decided…", "I need to…", "The constraint is…"). Real chats are messier; expect the offline extractor to miss implicit facts and to over-extract chatty sentences. Use an LLM engine when quality matters more than staying offline. The metric exists to catch regressions in the rules, not to advertise the extractor.
-* **Retrieval misses are the interesting part.** Of 15 queries, 12 rank the gold item first. The three that do not:
-  * *"which translation model did we decide to fine-tune"* ranks the project item ("machine translation for Ladin") above the decision ("Fine-tune NLLB-200…") because "translation" is a strong shared term — rank 2.
-  * *"when is the launch date"* ranks "Building the launch plan…" above the dated decision — rank 2.
-  * *"how should documents be formatted"* finds nothing: the gold item says "bullet-point summaries" and shares no vocabulary with the query. This is the classic lexical-retrieval failure that semantic embeddings fix; when an adapter with real embeddings is configured, ContextBridge blends them in.
-* **Duplicate F1 is 75% by design choice.** All four errors are false negatives: rephrasings with similarity 0.70–0.79 sit below the 0.82 threshold. Lowering the threshold to catch them would also fold pairs like "Deadline is the end of Q3" / "…Q4" (0.73) and "citations in APA" / "…IEEE" (0.74), which is silent data loss. Those band pairs are surfaced as *possible conflicts* instead, so the user still sees them together.
-* **Redaction recall is measured on formats the detectors know.** Unusual key formats, secrets split across lines, or spelled-out phone numbers will be missed. Zero false positives on the clean set does not mean zero in the wild: long digit strings that pass a Luhn check, for instance, would be flagged.
+* **Duplicate F1 is 75% by design choice.** All four errors are false negatives: rephrasings with similarity 0.70–0.79 sit below the 0.82 threshold. Lowering the threshold to catch them would also fold pairs like "Deadline is the end of Q3" / "…Q4" (0.73), which is silent data loss. Those band pairs are surfaced as *possible conflicts* instead.
+* **Redaction recall is measured on formats the detectors know.** Unusual key formats, secrets split across lines, or spelled-out phone numbers will be missed.
 * **Token counts are estimates** (≈4 characters per token blended with a word count). Relative savings are meaningful; absolute numbers are ±20%.
 
-## Limitations of the suite itself
+## Limitations
 
-* Three transcripts is enough to catch regressions, not to characterise performance. Adding fixtures is cheap (see below) and welcome.
-* LLM-based extraction (OpenAI, Claude, Ollama) is not evaluated because it would require network access and non-deterministic model output. A future harness could record fixtures from a run and grade them offline.
+* LLM-based extraction (OpenAI, Claude, Ollama) is not evaluated because it would require network access and non-deterministic model output. A recorded-fixture harness (grade saved outputs offline, with an LLM judge and agreement statistics) is the next step and is tracked in the roadmap.
 * Retrieval is scored against gold memory, not extracted memory, so the end-to-end number a user experiences also depends on extraction quality.
 * There is no user study; "helpfulness" of the injected context to the target model is not measured.
+* Vector search performance (latency, HNSW recall against exact search) is a separate concern, covered by [BENCHMARKS.md](BENCHMARKS.md).
 
-## Adding a fixture
+## Adding golden pairs
 
-1. Write a transcript with `User:` / `Assistant:` turns.
-2. Label `gold_items` (category, content, and 1–2 `keywords` that must appear in a matching extracted item).
-3. Add `queries` with `relevant_gold` indices into the `gold_items` list.
-4. Register the file in `fixtures/index.json` and run `cb eval`.
-
-Tests in `tests/test_evaluation.py` assert floors (MRR ≥ 0.7, redaction recall ≥ 0.9, zero false positives, duplicate F1 ≥ 0.7) so a regression fails CI.
+1. Add items to an existing memory set or create a new one in `golden_pairs.json` (`category` + `content`).
+2. Add pairs with a unique `id`, the `set`, the `query`, the `relevant` indices, and honest `tags`.
+3. Run `cb eval --golden`; `validate_golden` rejects unknown sets, out-of-range indices and duplicate ids.
+4. If the aggregate moves, update the baseline in the same commit and explain why in the pull request.

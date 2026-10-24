@@ -1,0 +1,199 @@
+{
+  "generated_at": "2026-09-21T22:36:16.740813+00:00",
+  "corpus": "hierarchical",
+  "environment": {
+    "python": "3.12.14",
+    "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "contextbridge": "0.4.0",
+    "pgvector": "0.8.6"
+  },
+  "storage": {
+    "package_roundtrip": {
+      "sqlite": {
+        "median_ms": 1.159,
+        "p95_ms": 1.633,
+        "min_ms": 1.067,
+        "runs": 50
+      },
+      "postgres": {
+        "median_ms": 3.635,
+        "p95_ms": 4.421,
+        "min_ms": 3.501,
+        "runs": 50
+      }
+    },
+    "listing_200_packages": {
+      "sqlite": {
+        "median_ms": 0.385,
+        "p95_ms": 0.418,
+        "min_ms": 0.378,
+        "runs": 50
+      },
+      "postgres": {
+        "median_ms": 2.023,
+        "p95_ms": 2.111,
+        "min_ms": 1.982,
+        "runs": 50
+      }
+    }
+  },
+  "vectors": [
+    {
+      "n": 1000,
+      "dimension": 384,
+      "queries": 200,
+      "top_k": 10,
+      "corpus": "hierarchical",
+      "faiss_flat": {
+        "backend": "faiss",
+        "build_ms": 76.6,
+        "query": {
+          "median_ms": 0.1,
+          "p95_ms": 0.132,
+          "min_ms": 0.097,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "numpy_bruteforce": {
+        "build_ms": 0.1,
+        "query": {
+          "median_ms": 0.069,
+          "p95_ms": 0.091,
+          "min_ms": 0.064,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_exact": {
+        "insert_ms": 252.7,
+        "query": {
+          "median_ms": 1.758,
+          "p95_ms": 1.874,
+          "min_ms": 1.692,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_hnsw": {
+        "insert_ms": 252.7,
+        "index_build_ms": 195.9,
+        "query": {
+          "median_ms": 1.735,
+          "p95_ms": 1.78,
+          "min_ms": 1.696,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      }
+    },
+    {
+      "n": 10000,
+      "dimension": 384,
+      "queries": 200,
+      "top_k": 10,
+      "corpus": "hierarchical",
+      "faiss_flat": {
+        "backend": "faiss",
+        "build_ms": 307.1,
+        "query": {
+          "median_ms": 0.682,
+          "p95_ms": 0.876,
+          "min_ms": 0.628,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "numpy_bruteforce": {
+        "build_ms": 1.0,
+        "query": {
+          "median_ms": 0.488,
+          "p95_ms": 2.998,
+          "min_ms": 0.439,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_exact": {
+        "insert_ms": 2511.4,
+        "query": {
+          "median_ms": 7.213,
+          "p95_ms": 10.265,
+          "min_ms": 6.308,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_hnsw": {
+        "insert_ms": 2511.4,
+        "index_build_ms": 951.7,
+        "query": {
+          "median_ms": 1.664,
+          "p95_ms": 1.713,
+          "min_ms": 1.508,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      }
+    },
+    {
+      "n": 50000,
+      "dimension": 384,
+      "queries": 200,
+      "top_k": 10,
+      "corpus": "hierarchical",
+      "faiss_flat": {
+        "backend": "faiss",
+        "build_ms": 1506.4,
+        "query": {
+          "median_ms": 4.575,
+          "p95_ms": 5.18,
+          "min_ms": 4.34,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "numpy_bruteforce": {
+        "build_ms": 4.3,
+        "query": {
+          "median_ms": 3.464,
+          "p95_ms": 3.7,
+          "min_ms": 3.365,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_exact": {
+        "insert_ms": 12824.6,
+        "query": {
+          "median_ms": 22.68,
+          "p95_ms": 23.814,
+          "min_ms": 22.153,
+          "runs": 50
+        },
+        "recall_at_k": 1.0
+      },
+      "pgvector_hnsw": {
+        "insert_ms": 12824.6,
+        "index_build_ms": 10717.8,
+        "query": {
+          "median_ms": 1.871,
+          "p95_ms": 2.021,
+          "min_ms": 1.727,
+          "runs": 50
+        },
+        "recall_at_k": 0.992
+      }
+    }
+  ],
+  "embedding_reuse": {
+    "items": 200,
+    "dimension": 384,
+    "simulated_embed_latency_ms": 50,
+    "in_memory_store_second_query_ms": 118.6,
+    "in_memory_store_embed_calls_per_query": 2,
+    "pgvector_second_query_ms": 61.0,
+    "pgvector_embed_calls_per_query": 1
+  }
+}

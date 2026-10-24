@@ -18,6 +18,18 @@ from typing import Any
 
 from contextbridge.adapters import get_adapter
 from contextbridge.config import Settings
+from contextbridge.core.lifecycle import (
+    Handoff,
+    PendingConflict,
+    detect_handoff,
+    find_pending_conflicts,
+    health_report,
+    pending_from_metadata,
+    prune_pending,
+    set_status,
+    store_pending,
+    supersede,
+)
 from contextbridge.core.llm_interface import LLMInterface
 from contextbridge.core.local_extractor import LocalExtractor
 from contextbridge.core.memory import MemoryExtractor, parse_chat_transcript
@@ -31,17 +43,29 @@ from contextbridge.core.redaction import (
     scan_text,
 )
 from contextbridge.core.retriever import MemoryRetriever
+from contextbridge.core.sharing import (
+    apply_sharing,
+    classify_target,
+    partition_for_target,
+    sharing_counts,
+)
 from contextbridge.core.tokens import estimate_tokens
 from contextbridge.models import (
     ContextPackage,
+    EgressRecord,
+    ItemStatus,
     MemoryCategory,
+    MemoryItem,
     RetrievalOptions,
     RetrievalResult,
+    SharingPolicy,
     StructuredMemory,
+    WithheldItem,
 )
 from contextbridge.storage.base import PackageNotFoundError, StorageBackend
 from contextbridge.storage.portable import dumps_package, import_package
 from contextbridge.storage.vector_store import VectorStore
+from contextbridge.telemetry import set_attribute, span
 from contextbridge.validation import (
     ValidationError,
     validate_package_name,
@@ -81,7 +105,11 @@ class ImportOutcome:
     chars: int
     transcript_tokens: int
     added_items: int = 0
+    re_seen_items: int = 0
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    handoff: Handoff | None = None
+    conflicts: list[PendingConflict] = field(default_factory=list)
 
 
 class ContextBridgeService:
@@ -167,13 +195,57 @@ class ContextBridgeService:
             raise ValidationError("No text to import")
         if mode not in {"append", "replace"}:
             raise ValidationError("mode must be 'append' or 'replace'")
+        with span("import_text", package_name=name, engine=engine, mode=mode, chars=len(text)):
+            return self._import_text(
+                text,
+                name,
+                engine=engine,
+                origin=origin,
+                redact=redact,
+                redaction_kinds=redaction_kinds,
+                mode=mode,
+            )
+
+    def _import_text(
+        self,
+        text: str,
+        name: str,
+        *,
+        engine: str,
+        origin: str,
+        redact: bool | None,
+        redaction_kinds: list[str] | None,
+        mode: str,
+    ) -> ImportOutcome:
+        notes: list[str] = []
+        text, handoff = detect_handoff(text)
+        if handoff is not None:
+            if not text.strip():
+                raise ValidationError(
+                    "The file contains only a pasted ContextBridge prompt and no new "
+                    "conversation, so there is nothing to import."
+                )
+            notes.append(
+                f"Hand-off detected: this chat started from package "
+                f"'{handoff.package_name}' v{handoff.package_version}."
+                + (
+                    f" The pasted context ({handoff.stripped_chars:,} chars) was skipped "
+                    "so the package does not re-import an echo of itself."
+                    if handoff.stripped_chars
+                    else ""
+                )
+            )
 
         label, adapter = self.resolve_engine(engine)
-        memory = self._extract_with(text, label, adapter, origin)
+        with span("extract", engine=label):
+            memory = self._extract_with(text, label, adapter, origin)
+            set_attribute("extracted", memory.total_items)
 
         do_redact = self.settings.redact_by_default if redact is None else redact
         policy = RedactionPolicy(enabled=do_redact, kinds=redaction_kinds)
-        memory, report = redact_memory(memory, policy)
+        with span("redact", enabled=do_redact):
+            memory, report = redact_memory(memory, policy)
+            set_attribute("redacted_values", report.total)
 
         transcript_tokens = parse_chat_transcript(text).total_tokens_estimate
         warnings: list[str] = []
@@ -184,6 +256,8 @@ class ContextBridgeService:
             )
 
         created = not self.store.exists(name)
+        conflicts: list[PendingConflict] = []
+        re_seen = 0
         if created:
             pkg = self.packager.create(name, memory, source_model=label)
             added = memory.total_items
@@ -193,9 +267,29 @@ class ContextBridgeService:
             if mode == "replace":
                 pkg = self.packager.update(pkg, memory, source_model=label, note="replaced")
             else:
+                conflicts = find_pending_conflicts(pkg.memory, memory, merger=self.merger)
                 pkg = self.packager.append(pkg, memory, source_model=label, note="imported")
+                re_seen = len(before & set(memory.items_by_id()))
             added = len(set(pkg.memory.items_by_id()) - before)
-        self.store.save(pkg)
+
+        if handoff is not None:
+            handoffs = list(pkg.metadata.get("handoffs") or [])
+            handoffs.append({**handoff.model_dump(mode="json"), "origin": origin})
+            pkg.metadata["handoffs"] = handoffs[-50:]
+        if conflicts:
+            known = {p.key: p for p in pending_from_metadata(pkg.metadata)}
+            for c in conflicts:
+                known.setdefault(c.key, c)
+            store_pending(pkg.metadata, list(known.values()))
+            notes.append(
+                f"{len(conflicts)} new statement(s) may contradict what the package already "
+                "holds. Review them with 'cb conflicts' or in the dashboard."
+            )
+        self._save(pkg)
+        set_attribute("added", added)
+        set_attribute("re_seen", re_seen)
+        set_attribute("conflicts", len(conflicts))
+        set_attribute("created", created)
 
         return ImportOutcome(
             package=pkg,
@@ -206,8 +300,19 @@ class ContextBridgeService:
             chars=len(text),
             transcript_tokens=transcript_tokens,
             added_items=added,
+            re_seen_items=re_seen,
             warnings=warnings,
+            notes=notes,
+            handoff=handoff,
+            conflicts=conflicts,
         )
+
+    def _save(self, pkg: ContextPackage) -> None:
+        """Persist a package after dropping pending conflicts that no longer apply."""
+        pending = pending_from_metadata(pkg.metadata)
+        if pending:
+            store_pending(pkg.metadata, prune_pending(pkg.memory, pending))
+        self.store.save(pkg)
 
     def scan(self, text: str) -> RedactionReport:
         """Report what the redactor *would* mask in *text*, without changing it."""
@@ -236,11 +341,9 @@ class ContextBridgeService:
 
     def remove_items(self, name: str, item_ids: Iterable[str], *, note: str = "") -> ContextPackage:
         pkg = self.get_package(name)
-        ids = {i for i in item_ids if isinstance(i, str) and i}
-        if not ids:
-            raise ValidationError("No item ids given")
+        ids = self._clean_ids(item_ids)
         pkg = self.packager.remove_items(pkg, ids, note=note or "removed during review")
-        self.store.save(pkg)
+        self._save(pkg)
         return pkg
 
     def history(self, name: str) -> list[dict[str, Any]]:
@@ -249,8 +352,166 @@ class ContextBridgeService:
     def rollback(self, name: str, version: int) -> ContextPackage:
         pkg = self.get_package(name)
         pkg = self.packager.rollback(pkg, version)
-        self.store.save(pkg)
+        self._save(pkg)
         return pkg
+
+    @staticmethod
+    def _clean_ids(item_ids: Iterable[str]) -> set[str]:
+        ids = {i.strip() for i in item_ids if isinstance(i, str) and i.strip()}
+        if not ids:
+            raise ValidationError("No item ids given")
+        return ids
+
+    # -- Sharing boundaries --------------------------------------------------
+
+    def set_sharing(
+        self, name: str, item_ids: Iterable[str], policy: SharingPolicy | str
+    ) -> tuple[ContextPackage, int]:
+        """Apply a sharing policy to items; returns the package and how many items changed."""
+        try:
+            chosen = SharingPolicy(str(policy).strip().lower())
+        except ValueError as exc:
+            valid = ", ".join(p.value for p in SharingPolicy)
+            raise ValidationError(
+                f"Unknown sharing policy {policy!r}. Choose from: {valid}"
+            ) from exc
+        pkg = self.get_package(name)
+        ids = self._clean_ids(item_ids)
+        missing = ids - set(pkg.memory.items_by_id())
+        if missing:
+            raise ValidationError(f"Unknown item id(s): {', '.join(sorted(missing))}")
+        memory, changed = apply_sharing(pkg.memory, ids, chosen)
+        if changed:
+            pkg = self.packager.apply(pkg, memory, note=f"sharing set to {chosen.value}")
+            self._save(pkg)
+        return pkg, changed
+
+    # -- Lifecycle -----------------------------------------------------------
+
+    def set_status(
+        self, name: str, item_ids: Iterable[str], status: ItemStatus | str
+    ) -> tuple[ContextPackage, int]:
+        """Mark items ``done`` or ``active`` again; use :meth:`supersede` for replacements."""
+        try:
+            chosen = ItemStatus(str(status).strip().lower())
+        except ValueError as exc:
+            raise ValidationError(f"Unknown status {status!r}. Choose from: active, done") from exc
+        if chosen == ItemStatus.SUPERSEDED:
+            raise ValidationError("Use supersede(old_id, new_id) to record a replacement")
+        pkg = self.get_package(name)
+        ids = self._clean_ids(item_ids)
+        missing = ids - set(pkg.memory.items_by_id())
+        if missing:
+            raise ValidationError(f"Unknown item id(s): {', '.join(sorted(missing))}")
+        memory, changed = set_status(pkg.memory, ids, chosen)
+        if changed:
+            note = "marked done" if chosen == ItemStatus.DONE else "reactivated"
+            pkg = self.packager.apply(pkg, memory, note=note)
+            self._save(pkg)
+        return pkg, changed
+
+    def supersede(self, name: str, old_id: str, new_id: str) -> ContextPackage:
+        """Record that *new_id* replaces *old_id*; the old item stays, marked superseded."""
+        pkg = self.get_package(name)
+        try:
+            memory = supersede(pkg.memory, old_id.strip(), new_id.strip())
+        except KeyError as exc:
+            raise ValidationError(f"Unknown item id: {exc.args[0]}") from exc
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        pkg = self.packager.apply(pkg, memory, note=f"{old_id} superseded by {new_id}")
+        self._save(pkg)
+        return pkg
+
+    def pending_conflicts(self, name: str) -> list[PendingConflict]:
+        pkg = self.get_package(name)
+        return prune_pending(pkg.memory, pending_from_metadata(pkg.metadata))
+
+    def resolve_conflict(
+        self, name: str, existing_id: str, incoming_id: str, action: str
+    ) -> ContextPackage:
+        """
+        Settle a pending conflict.
+
+        ``keep_new`` supersedes the stored item with the incoming one,
+        ``keep_old`` the reverse, and ``dismiss`` records that both may stand.
+        """
+        action = (action or "").strip().lower()
+        if action not in {"keep_new", "keep_old", "dismiss"}:
+            raise ValidationError("action must be keep_new, keep_old, or dismiss")
+        pkg = self.get_package(name)
+        pending = pending_from_metadata(pkg.metadata)
+        key = f"{existing_id}:{incoming_id}"
+        if not any(p.key == key for p in pending):
+            raise ValidationError("No such pending conflict")
+        if action == "keep_new":
+            memory = supersede(pkg.memory, existing_id, incoming_id)
+            pkg = self.packager.apply(
+                pkg, memory, note=f"{existing_id} superseded by {incoming_id}"
+            )
+        elif action == "keep_old":
+            memory = supersede(pkg.memory, incoming_id, existing_id)
+            pkg = self.packager.apply(
+                pkg, memory, note=f"{incoming_id} superseded by {existing_id}"
+            )
+        store_pending(pkg.metadata, [p for p in pending if p.key != key])
+        self._save(pkg)
+        return pkg
+
+    # -- Audit & health ------------------------------------------------------
+
+    def audit(self, name: str, *, limit: int = 200) -> dict[str, Any]:
+        """The egress ledger for a package plus a per-item "who has seen this" summary."""
+        pkg = self.get_package(name)
+        records = self.store.egress_records(pkg.name, limit=limit)
+        by_id = pkg.memory.items_by_id()
+        per_item: dict[str, dict[str, Any]] = {}
+        for record in records:
+            for item_id in record.item_ids:
+                entry = per_item.setdefault(
+                    item_id, {"targets": {}, "cloud": False, "last": record.timestamp.isoformat()}
+                )
+                entry["targets"][record.target_model] = (
+                    entry["targets"].get(record.target_model, 0) + 1
+                )
+                entry["cloud"] = entry["cloud"] or record.target_kind == "cloud"
+        items = []
+        for item_id, entry in per_item.items():
+            item = by_id.get(item_id)
+            items.append(
+                {
+                    "id": item_id,
+                    "content": item.content if item else "(item no longer in package)",
+                    "category": item.category.value if item else "",
+                    "present": item is not None,
+                    "targets": entry["targets"],
+                    "sent_to_cloud": entry["cloud"],
+                    "last_shared_at": entry["last"],
+                }
+            )
+        items.sort(key=lambda e: (not e["sent_to_cloud"], e["id"]))
+        cloud_ids = {e["id"] for e in items if e["sent_to_cloud"]}
+        return {
+            "package_name": pkg.name,
+            "version": pkg.version,
+            "events": [r.model_dump(mode="json") for r in records],
+            "items": items,
+            "summary": {
+                "events": len(records),
+                "items_shared": len(items),
+                "items_shared_with_cloud": len(cloud_ids),
+                "items_never_shared": sum(1 for i in by_id if i not in per_item),
+                "targets": sorted({r.target_model for r in records}),
+            },
+        }
+
+    def clear_audit(self, name: str) -> int:
+        return self.store.clear_egress(validate_package_name(name))
+
+    def health(self, name: str, *, stale_days: int = 30) -> dict[str, Any]:
+        pkg = self.get_package(name)
+        records = self.store.egress_records(pkg.name, limit=1000)
+        return health_report(pkg, egress=records, stale_days=stale_days)
 
     # -- Retrieval & prompts -------------------------------------------------
 
@@ -266,8 +527,34 @@ class ContextBridgeService:
         """Explainable retrieval over a stored package (lexical unless an adapter is given)."""
         pkg = self.get_package(name)
         return self.retrieve_from_memory(
-            pkg.memory, query, options, adapter=adapter, transcript_tokens=transcript_tokens
+            pkg.memory,
+            query,
+            options,
+            adapter=adapter,
+            transcript_tokens=transcript_tokens,
+            package_name=pkg.name,
         )
+
+    def vector_store_for(self, package_name: str | None, adapter: LLMInterface | None):
+        """Pick the vector store for a retrieval: pgvector when the backend is Postgres.
+
+        Vectors persisted in pgvector are keyed by package and embedding
+        model, so a package embedded once with OpenAI does not have to be
+        re-embedded on the next query.  Every other backend gets a fresh
+        in-memory FAISS / numpy store.
+        """
+        if package_name and getattr(self.store, "backend_name", "") == "postgres":
+            try:
+                from contextbridge.storage.postgres_store import PgVectorStore
+            except Exception:  # pragma: no cover - psycopg missing
+                return VectorStore()
+            model = (
+                getattr(adapter, "embedding_model", None) or getattr(adapter, "name", "default")
+                if adapter is not None
+                else "default"
+            )
+            return PgVectorStore(self.store, package_name, model=str(model))  # type: ignore[arg-type]
+        return VectorStore()
 
     def retrieve_from_memory(
         self,
@@ -277,17 +564,32 @@ class ContextBridgeService:
         *,
         adapter: LLMInterface | None = None,
         transcript_tokens: int | None = None,
+        package_name: str | None = None,
     ) -> RetrievalResult:
         options = options or RetrievalOptions()
-        if adapter is None:
-            retriever = MemoryRetriever()
-            retriever.index_sync(memory)
-            return retriever.retrieve_sync(query, options, transcript_tokens=transcript_tokens)
-        retriever = MemoryRetriever(VectorStore())
-        _run(retriever.index(memory, adapter))
-        return _run(
-            retriever.retrieve(query, adapter, options, transcript_tokens=transcript_tokens)
-        )
+        with span(
+            "retrieve",
+            package_name=package_name,
+            items=memory.total_items,
+            top_k=options.top_k,
+            semantic=adapter is not None,
+        ):
+            if adapter is None:
+                retriever = MemoryRetriever()
+                retriever.index_sync(memory)
+                result = retriever.retrieve_sync(
+                    query, options, transcript_tokens=transcript_tokens
+                )
+            else:
+                retriever = MemoryRetriever(self.vector_store_for(package_name, adapter))
+                _run(retriever.index(memory, adapter))
+                result = _run(
+                    retriever.retrieve(query, adapter, options, transcript_tokens=transcript_tokens)
+                )
+            set_attribute("selected", len(result.selected))
+            set_attribute("method", result.method)
+            set_attribute("tokens_selected", result.tokens_selected)
+            return result
 
     def build_prompt(
         self,
@@ -298,44 +600,187 @@ class ContextBridgeService:
         options: RetrievalOptions | None = None,
         extras: Iterable[tuple[str, str]] = (),
         adapter: LLMInterface | None = None,
+        surface: str = "cli",
+        record: bool = True,
     ) -> dict[str, Any]:
         """
         Build a paste-ready prompt, optionally narrowed by retrieval.
 
-        Returns a dict with the prompt, the context block alone, token
-        estimates, and (when a query was given) the retrieval result.
-        """
-        pkg = self.get_package(name)
-        retrieval: RetrievalResult | None = None
-        if query and query.strip():
-            retrieval = self.retrieve_from_memory(pkg.memory, query, options, adapter=adapter)
-            context_block = self.builder.build_from_retrieval(pkg, retrieval, target_model)
-        else:
-            context_block = self.builder.build(pkg, target_model)
+        The package memory is first partitioned by the target's kind: items
+        whose sharing policy or status forbids rendering are *withheld* and
+        listed in the result.  Unless ``record`` is false, an egress ledger
+        entry records which item ids were rendered for which target.
 
-        if not context_block.strip():
-            raise ValidationError(
-                "Nothing to include: the package has no memory items"
-                + (" matching the query" if retrieval else "")
+        Returns a dict with the prompt, the context block alone, token
+        estimates, the withheld items, and (when a query was given) the
+        retrieval result.
+        """
+        with span(
+            "build_prompt",
+            package_name=name,
+            target_model=target_model,
+            surface=surface,
+            record=record,
+            narrowed=bool(query and query.strip()),
+        ):
+            return self._build_prompt(
+                name,
+                target_model,
+                query=query,
+                options=options,
+                extras=extras,
+                adapter=adapter,
+                surface=surface,
+                record=record,
             )
 
+    def _build_prompt(
+        self,
+        name: str,
+        target_model: str,
+        *,
+        query: str | None,
+        options: RetrievalOptions | None,
+        extras: Iterable[tuple[str, str]],
+        adapter: LLMInterface | None,
+        surface: str,
+        record: bool,
+    ) -> dict[str, Any]:
+        pkg = self.get_package(name)
+        allowed, withheld = partition_for_target(pkg.memory, target_model)
+        target_kind = classify_target(target_model)
+
+        retrieval: RetrievalResult | None = None
+        if query and query.strip():
+            retrieval = self.retrieve_from_memory(
+                allowed, query, options, adapter=adapter, package_name=pkg.name
+            )
+            rendered = retrieval.to_memory()
+            note = f"Selected by {retrieval.method} retrieval for: {query.strip()!r}"
+        else:
+            rendered = allowed
+            note = ""
+        if withheld:
+            note = (note + " | " if note else "") + f"Withheld: {len(withheld)}"
+        context_block = self.builder.build(pkg, target_model, memory=rendered, footer_note=note)
+
+        if not context_block.strip():
+            hint = " matching the query" if retrieval else ""
+            if withheld and not allowed.total_items:
+                hint = (
+                    f"; all {len(withheld)} item(s) are withheld from this target by their "
+                    "sharing policy or status"
+                )
+            raise ValidationError(f"Nothing to include: the package has no memory items{hint}")
+
         prompt = self.builder.paste_prompt(context_block, target_model, extras=extras)
-        full_block = self.builder.build(pkg, target_model)
+        full_block = self.builder.build(pkg, target_model, memory=allowed)
+        included_ids = [i.id for i in rendered.all_items]
+        tokens_prompt = estimate_tokens(prompt)
+        set_attribute("included", len(included_ids))
+        set_attribute("withheld", len(withheld))
+        set_attribute("tokens_prompt", tokens_prompt)
+
+        egress: EgressRecord | None = None
+        if record:
+            egress = self.store.record_egress(
+                EgressRecord(
+                    package_name=pkg.name,
+                    package_version=pkg.version,
+                    target_model=target_model,
+                    target_kind=target_kind,
+                    surface=surface,
+                    query=(query or "").strip()[:200],
+                    item_ids=included_ids,
+                    item_count=len(included_ids),
+                    withheld_count=len(withheld),
+                    tokens=tokens_prompt,
+                )
+            )
+
         return {
             "prompt": prompt,
             "context_block": context_block,
             "target_model": target_model,
+            "target_kind": target_kind,
             "target_name": target_display_name(target_model),
             "package_name": pkg.name,
             "version": pkg.version,
             "total_items": pkg.memory.total_items,
-            "included_items": retrieval.selected.__len__() if retrieval else pkg.memory.total_items,
-            "tokens_prompt": estimate_tokens(prompt),
+            "included_items": len(included_ids),
+            "included_ids": included_ids,
+            "withheld": withheld,
+            "withheld_count": len(withheld),
+            "tokens_prompt": tokens_prompt,
             "tokens_full_prompt": estimate_tokens(
                 self.builder.paste_prompt(full_block, target_model)
             ),
             "retrieval": retrieval,
+            "egress_id": egress.id if egress else None,
         }
+
+    def system_prompt_for_query(
+        self,
+        name: str,
+        question: str,
+        target_model: str,
+        *,
+        adapter: LLMInterface | None = None,
+        smart: bool = True,
+        top_k: int = 5,
+        surface: str = "query",
+    ) -> tuple[str, dict[str, Any]]:
+        """Context block for ``cb query``: partitioned, optionally narrowed, ledger-recorded."""
+        pkg = self.get_package(name)
+        allowed, withheld = partition_for_target(pkg.memory, target_model)
+        retrieval: RetrievalResult | None = None
+        if smart and allowed.total_items > 0:
+            retrieval = self.retrieve_from_memory(
+                allowed,
+                question,
+                RetrievalOptions(top_k=top_k),
+                adapter=adapter,
+                package_name=pkg.name,
+            )
+            rendered = retrieval.to_memory()
+        else:
+            rendered = allowed
+        block = self.builder.build(pkg, target_model, memory=rendered)
+        ids = [i.id for i in rendered.all_items]
+        self.store.record_egress(
+            EgressRecord(
+                package_name=pkg.name,
+                package_version=pkg.version,
+                target_model=target_model,
+                target_kind=classify_target(target_model),
+                surface=surface,
+                query=question.strip()[:200],
+                item_ids=ids,
+                item_count=len(ids),
+                withheld_count=len(withheld),
+                tokens=estimate_tokens(block),
+            )
+        )
+        return block, {
+            "included_items": len(ids),
+            "total_items": pkg.memory.total_items,
+            "withheld": withheld,
+            "retrieval": retrieval,
+        }
+
+    @staticmethod
+    def withheld_to_dicts(withheld: list[WithheldItem]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": w.item.id,
+                "category": w.item.category.value,
+                "content": w.item.content,
+                "reason": w.reason,
+                "sharing": w.item.sharing.value,
+                "status": w.item.status.value,
+            }
+            for w in withheld
+        ]
 
     # -- Portability ---------------------------------------------------------
 
@@ -373,48 +818,74 @@ class ContextBridgeService:
         if len(names) < 2:
             raise ValidationError("Merging needs at least two packages")
         target = validate_package_name(new_name)
-        packages = [self.get_package(n) for n in names]
-        if not dry_run and self.store.exists(target) and not overwrite:
-            raise ValidationError(f"Package '{target}' already exists")
-        merged, result = self.merger.merge_packages(packages, name=target, packager=self.packager)
-        if not dry_run:
-            self.store.save(merged)
-        return merged, result
+        with span("merge", package_name=target, sources=len(names), dry_run=dry_run):
+            packages = [self.get_package(n) for n in names]
+            if not dry_run and self.store.exists(target) and not overwrite:
+                raise ValidationError(f"Package '{target}' already exists")
+            merged, result = self.merger.merge_packages(
+                packages, name=target, packager=self.packager
+            )
+            if not dry_run:
+                self.store.save(merged)
+            set_attribute("duplicates", len(result.duplicates))
+            set_attribute("conflicts", len(result.conflicts))
+            return merged, result
 
     # -- Introspection -------------------------------------------------------
 
     @staticmethod
-    def memory_to_dict(memory: StructuredMemory) -> dict[str, list[dict[str, Any]]]:
-        """JSON-friendly memory listing with ids, provenance and redaction flags."""
+    def item_to_dict(item: MemoryItem) -> dict[str, Any]:
         return {
-            cat.value: [
-                {
-                    "id": item.id,
-                    "category": item.category.value,
-                    "content": item.content,
-                    "confidence": item.confidence,
-                    "source": item.source,
-                    "origin": item.origin,
-                    "redactions": [r.model_dump() for r in item.redactions],
-                    "tokens": estimate_tokens(item.content),
-                }
-                for item in memory.get_category(cat)
-            ]
+            "id": item.id,
+            "category": item.category.value,
+            "content": item.content,
+            "confidence": item.confidence,
+            "source": item.source,
+            "origin": item.origin,
+            "redactions": [r.model_dump() for r in item.redactions],
+            "sharing": item.sharing.value,
+            "status": item.status.value,
+            "superseded_by": item.superseded_by,
+            "seen_count": item.seen_count,
+            "first_seen": item.first_seen.isoformat(),
+            "last_seen": item.last_seen.isoformat(),
+            "tokens": estimate_tokens(item.content),
+        }
+
+    @classmethod
+    def memory_to_dict(cls, memory: StructuredMemory) -> dict[str, list[dict[str, Any]]]:
+        """JSON-friendly memory listing with ids, provenance, policy and lifecycle."""
+        return {
+            cat.value: [cls.item_to_dict(item) for item in memory.get_category(cat)]
             for cat in MemoryCategory
         }
 
     def package_to_dict(self, pkg: ContextPackage) -> dict[str, Any]:
+        pending = prune_pending(pkg.memory, pending_from_metadata(pkg.metadata))
+        by_id = pkg.memory.items_by_id()
         return {
             "name": pkg.name,
             "version": pkg.version,
             "schema_version": pkg.schema_version,
             "source_model": pkg.source_model,
             "total_items": pkg.memory.total_items,
+            "active_items": pkg.memory.active().total_items,
             "counts": pkg.memory.counts(),
+            "status_counts": pkg.memory.status_counts(),
+            "sharing_counts": sharing_counts(pkg.memory),
             "created_at": pkg.created_at.isoformat(),
             "updated_at": pkg.updated_at.isoformat(),
             "metadata": pkg.metadata,
             "memory": self.memory_to_dict(pkg.memory),
             "history": self.packager.get_version_summary(pkg),
             "tokens_full_memory": sum(estimate_tokens(i.content) for i in pkg.memory.all_items),
+            "pending_conflicts": [
+                {
+                    **p.model_dump(mode="json"),
+                    "existing": self.item_to_dict(by_id[p.existing_id]),
+                    "incoming": self.item_to_dict(by_id[p.incoming_id]),
+                }
+                for p in pending
+            ],
+            "handoffs": pkg.metadata.get("handoffs", []),
         }

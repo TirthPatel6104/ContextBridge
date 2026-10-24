@@ -7,13 +7,14 @@ import os
 import shutil
 from pathlib import Path
 
-from contextbridge.models import ContextPackage
+from contextbridge.models import ContextPackage, EgressRecord
 from contextbridge.storage.base import PackageNotFoundError, StorageBackend
 from contextbridge.validation import is_valid_package_name, validate_package_name
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_STORAGE_DIR = Path.home() / ".contextbridge"
+_EGRESS_FILE = "egress.jsonl"
 
 
 class JSONStore(StorageBackend):
@@ -128,6 +129,49 @@ class JSONStore(StorageBackend):
             except (IndexError, ValueError):
                 continue
         return sorted(versions)
+
+    # -- Egress ledger (one JSON line per event, per package) ----------------
+
+    def record_egress(self, record: EgressRecord) -> EgressRecord:
+        pkg_dir = self._pkg_dir(record.package_name)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        path = pkg_dir / _EGRESS_FILE
+        existing = self._read_ledger(path)
+        record.id = (existing[-1].id or 0) + 1 if existing else 1
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(record.model_dump_json() + "\n")
+        return record
+
+    def egress_records(self, name: str, *, limit: int = 200) -> list[EgressRecord]:
+        if not is_valid_package_name(name):
+            return []
+        rows = self._read_ledger(self._base / name.strip() / _EGRESS_FILE)
+        rows.sort(key=lambda r: (r.timestamp, r.id or 0), reverse=True)
+        return rows[:limit]
+
+    def clear_egress(self, name: str) -> int:
+        if not is_valid_package_name(name):
+            return 0
+        path = self._base / name.strip() / _EGRESS_FILE
+        count = len(self._read_ledger(path))
+        if path.exists():
+            path.unlink()
+        return count
+
+    @staticmethod
+    def _read_ledger(path: Path) -> list[EgressRecord]:
+        if not path.exists():
+            return []
+        rows: list[EgressRecord] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(EgressRecord.model_validate_json(line))
+            except ValueError:
+                continue  # a torn line from a crash mid-write: skip it
+        return rows
 
 
 def _atomic_write(path: Path, data: str) -> None:

@@ -1,0 +1,7 @@
+# Overrides for CI: reuse the image built by the workflow instead of rebuilding.
+services:
+  app:
+    image: contextbridge:ci
+    build: !reset null
+    environment:
+      CB_ENVIRONMENT: ci
